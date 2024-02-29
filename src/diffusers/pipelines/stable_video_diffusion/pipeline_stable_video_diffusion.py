@@ -507,8 +507,13 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
+                print("this is the size of the latent model input", latent_model_input.shape)
+                print("this is the size of the image latent", image_latents.shape)
+
                 # Concatenate image_latents over channels dimention
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
+
+                print("These are the latents after concatination", latent_model_input.shape)
 
                 # predict the noise residual
                 noise_pred = self.unet(

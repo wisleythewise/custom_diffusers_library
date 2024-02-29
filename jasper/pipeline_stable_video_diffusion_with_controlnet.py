@@ -76,7 +76,7 @@ class StableVideoDiffusionPipelineOutput(BaseOutput):
     frames: Union[List[PIL.Image.Image], np.ndarray]
 
 
-class StableVideoDiffusionPipeline(DiffusionPipeline):
+class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
     r"""
     Pipeline to generate video from an input image using Stable Video Diffusion.
 
@@ -119,6 +119,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+        self.controlnet = controlnet
 
     def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance):
         dtype = next(self.image_encoder.parameters()).dtype
@@ -515,6 +516,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                     latent_model_input,
                     t,
                     encoder_hidden_states=image_embeddings,
+                    added_time_ids=added_time_ids,
                     controlnet_cond=image,
                     return_dict=False,
                 )

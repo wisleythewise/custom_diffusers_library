@@ -28,6 +28,9 @@ else:
                 "StableVideoDiffusionPipeline",
                 "StableVideoDiffusionPipelineOutput",
             ],
+        "pipeline_stable_video_diffusion_with_controlnet": [
+            "StableVideoDiffusionPipelineWithControlNet",
+        ],
         }
     )
 
@@ -42,6 +45,10 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pipeline_stable_video_diffusion import (
             StableVideoDiffusionPipeline,
             StableVideoDiffusionPipelineOutput,
+        )
+
+        from .pipeline_stable_video_diffusion_with_controlnet import (
+            StableVideoDiffusionPipelineWithControlNet,
         )
 
 else:

@@ -21,12 +21,12 @@ import PIL.Image
 import torch
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 
-from ..src.diffusers.image_processor import VaeImageProcessor
-from ..src.diffusers.models import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
-from ..src.diffusers.schedulers import EulerDiscreteScheduler
-from ..src.diffusers.utils import BaseOutput, logging
-from ..src.diffusers.utils.torch_utils import is_compiled_module, randn_tensor
-from ..src.diffusers.pipelines.pipeline_utils import DiffusionPipeline
+from diffusers.image_processor import VaeImageProcessor
+from diffusers.models import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
+from diffusers.schedulers import EulerDiscreteScheduler
+from diffusers.utils import BaseOutput, logging
+from diffusers.utils.torch_utils import is_compiled_module, randn_tensor
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -115,6 +115,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
             image_encoder=image_encoder,
             unet=unet,
             scheduler=scheduler,
+            controlnet=controlnet,
             feature_extractor=feature_extractor,
         )
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)

@@ -457,6 +457,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         self,
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
         prompt: str = None,
+        conditioning_image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor]] = None,
         height: int = 576,
         width: int = 1024,
         num_frames: Optional[int] = None,

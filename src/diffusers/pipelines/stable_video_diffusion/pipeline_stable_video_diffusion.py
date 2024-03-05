@@ -430,7 +430,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         # 3. Encode input image
         image_embeddings = self._encode_image(image, device, num_videos_per_prompt, self.do_classifier_free_guidance)
 
-        print("This is the shape of the image embeddings", image_embeddings.shape)
+
 
         # NOTE: Stable Diffusion Video was conditioned on fps - 1, which
         # is why it is reduced here.

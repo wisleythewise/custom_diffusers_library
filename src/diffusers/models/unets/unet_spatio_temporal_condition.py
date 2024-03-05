@@ -442,6 +442,11 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)
 
+        # print the shapes of the encoder hidden states and sample with the text we are in the spatiotemporalunet
+        # print(f"AAAAAAAAAAAAAAAAAA Encoder hidden states shape: {encoder_hidden_states.shape}")
+        # print(f"AAAAAAAAAAAAAAAAAA Sample shape: {sample.shape}")
+
+
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
@@ -459,7 +464,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
                 )
 
             
-            print(f"Res samples shape unet: {res_samples[0].shape}")
+            # print(f"Res samples shape unet: {res_samples[0].shape}")
 
             down_block_res_samples += res_samples
 
@@ -467,7 +472,8 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         # Print the shape of the down block res samples
         for down_block_res_sample in down_block_res_samples:
-            print(f"Down block res samples shape uuuuuuuu: {down_block_res_sample.shape}")
+            # print(f"Down block res samples shape uuuuuuuu: {down_block_res_sample.shape}")
+            pass
 
         if self.controlnet_enabled and down_block_additional_residuals is not None:
             new_down_block_res_samples = ()

@@ -15,12 +15,12 @@
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Union
-
+import gc
 import numpy as np
 import PIL.Image
 import torch
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
-
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models import AutoencoderKLTemporalDecoder, UNetSpatioTemporalConditionModel
 from diffusers.schedulers import EulerDiscreteScheduler
@@ -102,6 +102,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
     def __init__(
         self,
         vae: AutoencoderKLTemporalDecoder,
+        tokenizer : CLIPTokenizer ,
+        text_encoder: CLIPTextModel,
         image_encoder: CLIPVisionModelWithProjection,
         unet: UNetSpatioTemporalConditionModel,
         scheduler: EulerDiscreteScheduler,
@@ -110,9 +112,19 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
     ):
         super().__init__()
 
+        if tokenizer is None or text_encoder is None:
+            pipeline = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-2")
+            tokenizer = pipeline.tokenizer
+            text_encoder = pipeline.text_encoder
+            del pipeline
+            gc.collect()
+            
+
         self.register_modules(
             vae=vae,
             image_encoder=image_encoder,
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
             unet=unet,
             scheduler=scheduler,
             controlnet=controlnet,
@@ -121,6 +133,137 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.controlnet = controlnet
+        self.tokenizer = tokenizer
+        self.text_encoder = text_encoder
+
+
+    def encode_prompt(
+        prompt,
+        device,
+        do_classifier_free_guidance,
+        negative_prompt="Simulation, artifacts, blurry, low resolution, low quality, noisy, grainy, distorted",
+        num_images_per_prompt = 1,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        lora_scale: Optional[float] = None,
+        clip_skip: Optional[int] = None,
+        text_encoder = None, 
+        tokenizer = None):
+        # Set the text_encoder and the tokenizer on the correct device  
+        text_encoder = text_encoder.to(device)
+
+
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        if True:
+
+            text_inputs = tokenizer(
+                prompt,
+                padding="max_length",
+                max_length=tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            text_input_ids = text_inputs.input_ids
+            untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+            if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(
+                text_input_ids, untruncated_ids
+            ):
+                removed_text = tokenizer.batch_decode(
+                    untruncated_ids[:, tokenizer.model_max_length - 1 : -1]
+                )
+                logger.warning(
+                    "The following part of your input was truncated because CLIP can only handle sequences up to"
+                    f" {tokenizer.model_max_length} tokens: {removed_text}"
+                )
+
+            if hasattr(text_encoder.config, "use_attention_mask") and text_encoder.config.use_attention_mask:
+                attention_mask = text_inputs.attention_mask.to(device)
+            else:
+                attention_mask = None
+
+
+            prompt_embeds = text_encoder(text_input_ids.to(device), attention_mask=attention_mask)
+            prompt_embeds = prompt_embeds[0]
+
+
+        if text_encoder is not None:
+            prompt_embeds_dtype = text_encoder.dtype
+
+
+        prompt_embeds = prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
+
+
+        bs_embed, seq_len, _ = prompt_embeds.shape
+        print(f"Shape of prompt embeds: {prompt_embeds.shape} {bs_embed} {seq_len}")
+
+        # duplicate text embeddings for each generation per prompt, using mps friendly method
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+        # get unconditional embeddings for classifier free guidance
+        if do_classifier_free_guidance and negative_prompt_embeds is None:
+            uncond_tokens: List[str]
+            if negative_prompt is None:
+                uncond_tokens = [""] * batch_size
+            elif prompt is not None and type(prompt) is not type(negative_prompt):
+                raise TypeError(
+                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
+                    f" {type(prompt)}."
+                )
+            elif isinstance(negative_prompt, str):
+                uncond_tokens = [negative_prompt]
+            elif batch_size != len(negative_prompt):
+                raise ValueError(
+                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
+                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
+                    " the batch size of `prompt`."
+                )
+            else:
+                uncond_tokens = negative_prompt
+
+            max_length = prompt_embeds.shape[1]
+            uncond_input = tokenizer(
+                uncond_tokens,
+                padding="max_length",
+                max_length=max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+
+            if hasattr(text_encoder.config, "use_attention_mask") and text_encoder.config.use_attention_mask:
+                attention_mask = uncond_input.attention_mask.to(device)
+            else:
+                attention_mask = None
+
+            negative_prompt_embeds = text_encoder(
+                uncond_input.input_ids.to(device),
+                attention_mask=attention_mask,
+            )
+            negative_prompt_embeds = negative_prompt_embeds[0]
+
+        if do_classifier_free_guidance:
+            # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
+            seq_len = negative_prompt_embeds.shape[1]
+
+            negative_prompt_embeds = negative_prompt_embeds.to(dtype=prompt_embeds_dtype, device=device)
+
+            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+
+
+        embeds = torch.cat([prompt_embeds, negative_prompt_embeds])
+        embeds = embeds.mean(dim=1, keepdim=True)
+
+        return embeds
+
 
     def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance):
         dtype = next(self.image_encoder.parameters()).dtype
@@ -313,6 +456,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
     def __call__(
         self,
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
+        prompt: str = None,
         height: int = 576,
         width: int = 1024,
         num_frames: Optional[int] = None,
@@ -430,8 +574,17 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # corresponds to doing no classifier free guidance.
         self._guidance_scale = max_guidance_scale
 
+
+
         # 3. Encode input image
         image_embeddings = self._encode_image(image, device, num_videos_per_prompt, self.do_classifier_free_guidance)
+
+
+        
+        if prompt is not None:        
+            # Add a prompt
+            prompt_embeds = self.encode_prompt(prompt=prompt, device=device, do_classifier_free_guidance=True, text_encoder=self.text_encoder, tokenizer=self.tokenizer)
+
 
         # NOTE: Stable Diffusion Video was conditioned on fps - 1, which
         # is why it is reduced here.

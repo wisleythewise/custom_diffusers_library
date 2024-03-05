@@ -430,6 +430,8 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         # 3. Encode input image
         image_embeddings = self._encode_image(image, device, num_videos_per_prompt, self.do_classifier_free_guidance)
 
+        print("This is the shape of the image embeddings", image_embeddings.shape)
+
         # NOTE: Stable Diffusion Video was conditioned on fps - 1, which
         # is why it is reduced here.
         # See: https://github.com/Stability-AI/generative-models/blob/ed0997173f98eaf8f4edf7ba5fe8f15c6b877fd3/scripts/sampling/simple_video_sample.py#L188
@@ -514,7 +516,10 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
                 print("These are the latents after concatination", latent_model_input.shape)
-
+                # Print the shapes
+                print("This is the shape of the image embeddings", image_embeddings.shape)
+                # Print shape input
+                print("This is the shape of the input to the unet", latent_model_input.shape)
                 # predict the noise residual
                 noise_pred = self.unet(
                     latent_model_input,

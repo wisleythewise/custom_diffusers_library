@@ -138,6 +138,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
 
     def encode_prompt(
+        self,
         prompt,
         device,
         do_classifier_free_guidance,

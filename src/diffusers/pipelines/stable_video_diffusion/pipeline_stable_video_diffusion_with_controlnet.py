@@ -673,7 +673,6 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     t,
                     encoder_hidden_states= prompt_embeds if prompt is not None else image_embeddings, 
                     added_time_ids=added_time_ids,
-                    controlnet_cond=image,
                     return_dict=False,
                     controlnet_condition = conditioning_image
                 )

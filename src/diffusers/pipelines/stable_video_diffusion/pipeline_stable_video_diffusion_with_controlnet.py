@@ -670,10 +670,11 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 down_block_res_samples, mid_block_res_sample = self.controlnet.forward(
                     latent_model_input,
                     t,
-                    encoder_hidden_states=image_embeddings,
+                    encoder_hidden_states= prompt_embeds if prompt is not None else image_embeddings, 
                     added_time_ids=added_time_ids,
                     controlnet_cond=image,
                     return_dict=False,
+                    controlnet_condition = conditioning_image
                 )
 
                 # predict the noise residual

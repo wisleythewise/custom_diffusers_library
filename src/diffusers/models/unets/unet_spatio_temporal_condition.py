@@ -408,7 +408,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         batch_size, num_frames = sample.shape[:2]
-        print("This is the batch size",batch_size)  
+        # print("This is the batch size",batch_size)  
         timesteps = timesteps.expand(batch_size)
 
         t_emb = self.time_proj(timesteps)
@@ -527,7 +527,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
 
             # Print the iteration
-            print(f"This is the iteration {i}")
+            # print(f"This is the iteration {i}")
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
                 sample = upsample_block(
                     hidden_states=sample,

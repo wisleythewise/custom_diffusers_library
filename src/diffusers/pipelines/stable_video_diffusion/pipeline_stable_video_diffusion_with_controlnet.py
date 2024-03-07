@@ -27,6 +27,28 @@ from diffusers.schedulers import EulerDiscreteScheduler
 from diffusers.utils import BaseOutput, logging
 from diffusers.utils.torch_utils import is_compiled_module, randn_tensor
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
+import debugpy
+import gc
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPVisionModelWithProjection
+from typing import Optional, Tuple, Union
+from dataclasses import dataclass
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+from diffusers.models.unets import UNetSpatioTemporalConditionModel
+from diffusers import StableVideoDiffusionPipeline
+from diffusers.utils import load_image, export_to_video
+from diffusers.utils.torch_utils import is_compiled_module, randn_tensor
+import torch
+import torch.nn as nn
+from diffusers.configuration_utils import ConfigMixin, register_to_config
+from diffusers.loaders import UNet2DConditionLoadersMixin
+from diffusers.utils import BaseOutput, logging
+from diffusers.models.attention_processor import CROSS_ATTENTION_PROCESSORS, AttentionProcessor, AttnProcessor
+from diffusers.models.embeddings import TimestepEmbedding, Timesteps
+from diffusers.models.modeling_utils import ModelMixin
+from diffusers.models.unets.unet_3d_blocks import UNetMidBlockSpatioTemporal, get_down_block, get_up_block
+from diffusers.models.unets import UNetSpatioTemporalConditionModel
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -60,6 +82,526 @@ def tensor2vid(video: torch.Tensor, processor: "VaeImageProcessor", output_type:
         raise ValueError(f"{output_type} does not exist. Please choose one of ['np', 'pt', 'pil]")
 
     return outputs
+
+from dataclasses import dataclass
+from typing import Optional, Tuple, Union, Dict, Any
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CustomConditioningNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        
+
+        # Initial convolution to match the first target channel dimension
+        self.initial_conv = nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1)
+
+        # Defining a series of convolutional blocks to progressively downsample
+        # and increase channel dimensions towards the target size
+        self.conv_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+                nn.SiLU()
+            ),
+            nn.Sequential(
+                nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+                nn.SiLU()
+            ),
+            nn.Sequential(
+                nn.Conv2d(256, 320, kernel_size=3, stride=2, padding=1),
+                nn.SiLU()
+            )
+        ])
+
+        # Final adjustment to target spatial dimensions
+        # Considering a final adaptive pooling layer to ensure matching to the target spatial size (64x64)
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((72, 128))
+
+
+    def cast_model_to(self, device, dtype):
+        """
+        Casts all parameters and buffers of a given model to the specified device and data type.
+
+        Parameters:
+        - model: An instance of torch.nn.Module whose parameters and buffers are to be cast.
+        - device: The target device (e.g., 'cuda:0', 'cpu').
+        - dtype: The target data type (e.g., torch.float32, torch.float16).
+
+        Returns:
+        - The model with its parameters and buffers cast to the specified device and data type.
+        """
+        # Cast all parameters to the specified device and dtype.
+        for param in self.parameters():
+            param.data = param.data.to(device=device, dtype=dtype)
+            if param.requires_grad and param.grad is not None:
+                param.grad.data = param.grad.data.to(device=device, dtype=dtype)
+
+        # Cast all buffers (non-learnable parameters, e.g., running mean in BatchNorm) to the specified device and dtype.
+        for buffer in self.buffers():
+            buffer.data = buffer.data.to(device=device, dtype=dtype)
+        return
+
+    def forward(self, x):
+
+
+        x = self.initial_conv(x)
+        
+        for block in self.conv_blocks:
+            x = block(x)
+        
+        x = self.adaptive_pool(x)
+        
+        x = x.unsqueeze(0)
+        
+        x = torch.cat([x,x]) 
+        return x
+
+    
+
+class UNetSpatioTemporalConditionOutput(BaseOutput):
+    """
+    The output of [`UNetSpatioTemporalConditionModel`].
+
+    Args:
+        sample (`torch.FloatTensor` of shape `(batch_size, num_frames, num_channels, height, width)`):
+            The hidden states output conditioned on `encoder_hidden_states` input. Output of last layer of model.
+    """
+
+
+    sample: torch.FloatTensor = None
+
+
+class SpatioTemporalControlNetOutput(BaseOutput):
+    """
+    The output of [`ControlNetModel`].
+
+    Args:
+        down_block_res_samples (`tuple[torch.Tensor]`):
+            A tuple of downsample activations at different resolutions for each downsampling block. Each tensor should
+            be of shape `(batch_size, channel * resolution, height //resolution, width // resolution)`. Output can be
+            used to condition the original UNet's downsampling activations.
+        mid_down_block_re_sample (`torch.Tensor`):
+            The activation of the midde block (the lowest sample resolution). Each tensor should be of shape
+            `(batch_size, channel * lowest_resolution, height // lowest_resolution, width // lowest_resolution)`.
+            Output can be used to condition the original UNet's middle block activation.
+    """
+
+    down_block_res_samples: Tuple[torch.Tensor]
+    mid_block_res_sample: torch.Tensor
+    
+    # Add a class which prints the sizes of the tensors
+    def print_sizes(self):
+        print(f"Down block res samples: {self.down_block_res_samples[0].shape}")
+        print(f"Mid block res sample: {self.mid_block_res_sample.shape}")
+        
+
+
+
+
+
+class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
+    """
+    A SpatioTemporalControlNet model for conditioning on spatio-temporal data.
+    This model adapts concepts from both ControlNetModel and UNetSpatioTemporalConditionModel,
+    focusing on handling video frames over time.
+    """
+
+    _supports_gradient_checkpointing = True
+
+    @register_to_config
+    def __init__(
+        self,
+        sample_size: Optional[int] = None,
+        in_channels: int = 8,
+        down_block_types: Tuple[str] = (
+            "CrossAttnDownBlockSpatioTemporal",
+            "CrossAttnDownBlockSpatioTemporal",
+            "CrossAttnDownBlockSpatioTemporal",
+            "DownBlockSpatioTemporal",
+        ),
+        block_out_channels: Tuple[int] = (320, 640, 1280, 1280),
+        addition_time_embed_dim: int = 256,
+        projection_class_embeddings_input_dim: int = 768,
+        layers_per_block: Union[int, Tuple[int]] = 2,
+        cross_attention_dim: Union[int, Tuple[int]] = 1024,
+        transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
+        num_attention_heads: Union[int, Tuple[int]] = (5, 10, 10, 20),
+        conditioning_embedding = None
+
+    ):
+        super().__init__()
+        
+
+
+
+        self.sample_size = sample_size
+        self.conditioning_embedding = conditioning_embedding
+
+        # input
+        self.conv_in = nn.Conv2d(
+            in_channels,
+            block_out_channels[0],
+            kernel_size=3,
+            padding=1,
+        )
+
+        # time
+        time_embed_dim = block_out_channels[0] * 4
+
+        self.time_proj = Timesteps(block_out_channels[0], True, downscale_freq_shift=0)
+        timestep_input_dim = block_out_channels[0]
+
+        self.time_embedding = TimestepEmbedding(timestep_input_dim, time_embed_dim)
+
+        self.add_time_proj = Timesteps(addition_time_embed_dim, True, downscale_freq_shift=0)
+        self.add_embedding = TimestepEmbedding(projection_class_embeddings_input_dim, time_embed_dim)
+
+
+        output_channel = block_out_channels[0]
+        
+        self.controlnet_down_blocks = None
+        self.down_blocks = nn.ModuleList([])
+
+
+        
+        if isinstance(num_attention_heads, int):
+            num_attention_heads = (num_attention_heads,) * len(down_block_types)
+
+        if isinstance(cross_attention_dim, int):
+            cross_attention_dim = (cross_attention_dim,) * len(down_block_types)
+
+        if isinstance(layers_per_block, int):
+            layers_per_block = [layers_per_block] * len(down_block_types)
+
+        if isinstance(transformer_layers_per_block, int):
+            transformer_layers_per_block = [transformer_layers_per_block] * len(down_block_types)
+
+        blocks_time_embed_dim = time_embed_dim
+
+        # Initialize the connection between the down blocks and the unet
+        output_channel = block_out_channels[0]
+
+        # controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
+        # controlnet_block = zero_module(controlnet_block)
+        # self.controlnet_down_blocks.append(controlnet_block)
+
+        # down
+        output_channel = block_out_channels[0]
+        for i, down_block_type in enumerate(down_block_types):
+            input_channel = output_channel
+            output_channel = block_out_channels[i]
+            is_final_block = i == len(block_out_channels) - 1
+
+            down_block = get_down_block(
+                in_channels=input_channel,
+                out_channels=output_channel,
+                temb_channels=blocks_time_embed_dim,
+                num_layers=layers_per_block[i],
+                transformer_layers_per_block=transformer_layers_per_block[i],
+                add_downsample= not is_final_block,
+                resnet_eps=1e-5,
+                down_block_type=down_block_type,
+                cross_attention_dim=cross_attention_dim[i],
+                num_attention_heads=num_attention_heads[i],
+                resnet_act_fn="silu",
+            )
+            self.down_blocks.append(down_block)
+
+            # for _ in range(layers_per_block[i]):
+            #     controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
+            #     controlnet_block = zero_module(controlnet_block)
+            #     self.controlnet_down_blocks.append(controlnet_block)
+
+            # if not is_final_block:
+            #     controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
+            #     controlnet_block = zero_module(controlnet_block)
+            #     self.controlnet_down_blocks.append(controlnet_block)
+
+
+
+
+        # hardcoded_controlnet_block_dims = [320,320, 640,640, 1280, 1280, 1280,1280,1280]
+        # for index, controlnet_block_dim in enumerate(hardcoded_controlnet_block_dims):
+        #     controlnet_block = nn.Conv2d(controlnet_block_dim, controlnet_block_dim, kernel_size=1)
+        #     controlnet_block = zero_module(controlnet_block)
+        #     self.controlnet_down_blocks.append(controlnet_block)
+
+
+        # Connections for the mid block
+        mid_block_channel = block_out_channels[-1]
+
+        controlnet_block = nn.Conv2d(mid_block_channel, mid_block_channel, kernel_size=1)
+        controlnet_block = zero_module(controlnet_block)
+        self.controlnet_mid_block = controlnet_block
+
+
+        # mid
+        self.mid_block = UNetMidBlockSpatioTemporal(
+            block_out_channels[-1],
+            temb_channels=blocks_time_embed_dim,
+            transformer_layers_per_block=transformer_layers_per_block[-1],
+            cross_attention_dim=cross_attention_dim[-1],
+            num_attention_heads=num_attention_heads[-1],
+        )
+
+
+    def forward(
+        self,
+        sample: torch.FloatTensor,
+        timestep: Union[torch.Tensor, float, int],
+        encoder_hidden_states: torch.Tensor,
+        added_time_ids: torch.Tensor,
+        return_dict: bool = True,
+        controlnet_condition : torch.FloatTensor = None,
+    ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
+        r"""
+        The [`UNetSpatioTemporalConditionModel`] forward method.
+
+        Args:
+            sample (`torch.FloatTensor`):
+                The noisy input tensor with the following shape `(batch, num_frames, channel, height, width)`.
+            timestep (`torch.FloatTensor` or `float` or `int`): The number of timesteps to denoise an input.
+            encoder_hidden_states (`torch.FloatTensor`):
+                The encoder hidden states with shape `(batch, sequence_length, cross_attention_dim)`.
+            added_time_ids: (`torch.FloatTensor`):
+                The additional time ids with shape `(batch, num_additional_ids)`. These are encoded with sinusoidal
+                embeddings and added to the time embeddings.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~models.unet_slatio_temporal.UNetSpatioTemporalConditionOutput`] instead of a plain
+                tuple.
+        Returns:
+            [`~models.unet_slatio_temporal.UNetSpatioTemporalConditionOutput`] or `tuple`:
+                If `return_dict` is True, an [`~models.unet_slatio_temporal.UNetSpatioTemporalConditionOutput`] is returned, otherwise
+                a `tuple` is returned where the first element is the sample tensor.
+        """
+
+
+
+        # 1. time
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
+            # This would be a good case for the `match` statement (Python 3.10+)
+            is_mps = sample.device.type == "mps"
+            if isinstance(timestep, float):
+                dtype = torch.float32 if is_mps else torch.float64
+            else:
+                dtype = torch.int32 if is_mps else torch.int64
+            timesteps = torch.tensor([timesteps], dtype=dtype, device=sample.device)
+        elif len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(sample.device)
+
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        batch_size, num_frames = sample.shape[:2]
+        timesteps = timesteps.expand(batch_size)
+
+        t_emb = self.time_proj(timesteps)
+
+        # `Timesteps` does not contain any weights and will always return f32 tensors
+        # but time_embedding might actually be running in fp16. so we need to cast here.
+        # there might be better ways to encapsulate this.
+        t_emb = t_emb.to(dtype=sample.dtype)
+
+        emb = self.time_embedding(t_emb)
+
+        time_embeds = self.add_time_proj(added_time_ids.flatten())
+        time_embeds = time_embeds.reshape((batch_size, -1))
+        time_embeds = time_embeds.to(emb.dtype)
+        aug_emb = self.add_embedding(time_embeds)
+        emb = emb + aug_emb
+
+        # Flatten the batch and frames dimensions
+        # sample: [batch, frames, channels, height, width] -> [batch * frames, channels, height, width]
+        sample = sample.flatten(0, 1)
+
+        
+        # Repeat the embeddings num_video_frames times
+        # emb: [batch, channels] -> [batch * frames, channels]
+        emb = emb.repeat_interleave(num_frames, dim=0).to(sample.device)
+        # encoder_hidden_states: [batch, 1, channels] -> [batch * frames, 1, channels]
+        # Let encoder_hidden_states be just zeros in the correct format
+        # shape_encoder_hidden_states = (batch_size * num_frames, 1, 1024)
+
+        
+
+        if encoder_hidden_states is None:
+            shape_encoder_hidden_states = (batch_size * num_frames, 1, 1024)
+            encoder_hidden_states = torch.zeros(shape_encoder_hidden_states, device=sample.device).repeat_interleave(num_frames, dim=0).to(dtype=sample.dtype)
+            # print(f"Shape of encoder hidden states without: {encoder_hidden_states.shape}")
+        else: 
+            encoder_hidden_states = encoder_hidden_states.repeat_interleave(num_frames, dim=0)
+            # print(f"Shape of encoder hidden states with: {encoder_hidden_states.shape}")
+        
+        # Print the shape of the sample
+        # 2. pre-process
+        # print(f"Sample shape before the conversion: {sample.shape}")
+        sample = self.conv_in(sample)
+        # print(f"Sample shape after the conversion: {sample.shape}")
+
+
+        # Make sure the controlnet_condition model and the controlet have if same type
+        # And are running on the same device
+
+        if controlnet_condition is not None: 
+
+            current_device = sample.device
+            current_dtype = sample.dtype 
+
+            if next(self.conditioning_embedding.parameters()).is_cuda:
+                conditioning_nn = next(self.conditioning_embedding.parameters()).device
+            else:
+                conditioning_nn = torch.device('cpu')
+            
+            conditioning_nn_dtype = next(self.conditioning_embedding.parameters()).dtype
+
+            if  conditioning_nn!= current_device or  conditioning_nn_dtype != current_dtype:
+                
+                self.conditioning_embedding.cast_model_to(device=current_device, dtype=current_dtype)
+                
+            
+        if controlnet_condition is not None:
+            # Check if it has the same shape as the sample otherwise error
+            # To the device of the sample
+            controlnet_condition = controlnet_condition.to(sample.device, dtype=sample.dtype)
+            controlnet_condition =  self.conditioning_embedding.forward(controlnet_condition)
+            controlnet_condition = controlnet_condition.flatten(0, 1)
+            if controlnet_condition.shape != sample.shape:
+                raise ValueError(f"Jappie Controlnet condition shape {controlnet_condition.shape} does not match the sample shape {sample.shape}")
+        else:
+            controlnet_condition = torch.zeros_like(sample).to(sample.device, dtype=sample.dtype)
+        
+        sample += controlnet_condition
+        
+
+        image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)
+
+        down_block_res_samples = (sample,)
+        
+        for downsample_block in self.down_blocks:
+            if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
+                sample, res_samples = downsample_block(
+                    hidden_states=sample,
+                    temb=emb,
+                    encoder_hidden_states=encoder_hidden_states,
+                    image_only_indicator=image_only_indicator,
+                )
+            else:
+                sample, res_samples = downsample_block(
+                    hidden_states=sample,
+                    temb=emb,
+                    image_only_indicator=image_only_indicator,
+                )
+            # Print the shapes of the res_samples
+            down_block_res_samples += res_samples
+
+        # 4. mid
+        sample = self.mid_block(
+            hidden_states=sample,
+        temb=emb,
+            encoder_hidden_states=encoder_hidden_states,
+            image_only_indicator=image_only_indicator,
+        )
+
+        
+        # 5. Control net blocks
+
+        # initialize the controlnet_down_block_res_samples of it is on embpy nn.ModuleList
+        if self.controlnet_down_blocks is None:
+            self.controlnet_down_blocks = nn.ModuleList([])
+
+
+            for down_block_res_sample in down_block_res_samples:
+                # Determine the current number of channels in the tensor
+                current_channels = down_block_res_sample.size(1)
+                
+                # Dynamically create a zero convolution block for the current tensor
+                controlnet_block = nn.Conv2d(current_channels, current_channels, kernel_size=1)
+                controlnet_block = zero_module(controlnet_block).to(down_block_res_sample.device, dtype=sample.dtype)
+            
+                
+                # Store the processed sample for further use
+                self.controlnet_down_blocks.append(controlnet_block)
+    
+
+        controlnet_down_block_res_samples = ()
+
+        for index , (down_block_res_sample, controlnet_block) in enumerate(zip(down_block_res_samples, self.controlnet_down_blocks)):
+
+            # print to the debug console the device where the down_block_res_sample is
+            try:
+                # print the size of the down_block_res_sample
+                # print(f"Down block res sample shape before the conversion: {down_block_res_sample.shape}")
+                down_block_res_sample = controlnet_block(down_block_res_sample)
+                controlnet_down_block_res_samples = controlnet_down_block_res_samples + (down_block_res_sample,)
+            except Exception as e:
+                # Print the error in conjecuntion with the index
+                print(f"Error at index {index}: {e}")
+
+        down_block_res_samples = controlnet_down_block_res_samples
+
+        mid_block_res_sample = self.controlnet_mid_block(sample)
+
+        down_block_res_samples = [sample for sample in down_block_res_samples]
+        mid_block_res_sample = mid_block_res_sample
+
+        if not return_dict:
+            return (down_block_res_samples, mid_block_res_sample)
+
+        return SpatioTemporalControlNetOutput(
+            down_block_res_samples=down_block_res_samples, mid_block_res_sample=mid_block_res_sample
+        )
+
+    @classmethod
+    def from_unet(
+        cls,
+        unet: UNetSpatioTemporalConditionModel,
+        load_weights_from_unet: bool = True,
+    ):
+        
+        addition_time_embed_dim = (
+            unet.config.addition_time_embed_dim if "addition_time_embed_dim" in unet.config else None
+        )
+
+        
+
+        # conditioning net
+        condition_net = CustomConditioningNet()
+
+        controlnet = cls(
+            in_channels=unet.config.in_channels,
+            down_block_types=unet.config.down_block_types,
+            block_out_channels=unet.config.block_out_channels,  # What are block out channels
+            addition_time_embed_dim=addition_time_embed_dim,
+            projection_class_embeddings_input_dim=unet.config.projection_class_embeddings_input_dim,
+            layers_per_block=unet.config.layers_per_block,
+            cross_attention_dim=unet.config.cross_attention_dim,
+            transformer_layers_per_block=unet.config.transformer_layers_per_block,
+            num_attention_heads=unet.config.num_attention_heads,
+            conditioning_embedding = condition_net
+        )
+
+        if load_weights_from_unet:
+            controlnet.conv_in.load_state_dict(unet.conv_in.state_dict())
+            controlnet.time_proj.load_state_dict(unet.time_proj.state_dict())
+            controlnet.time_embedding.load_state_dict(unet.time_embedding.state_dict())
+
+            controlnet.down_blocks.load_state_dict(unet.down_blocks.state_dict())
+            controlnet.mid_block.load_state_dict(unet.mid_block.state_dict())
+
+        return controlnet
+
+def zero_module(module):
+    for p in module.parameters():
+        nn.init.zeros_(p)
+    return module
 
 
 @dataclass

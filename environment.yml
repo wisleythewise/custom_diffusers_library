@@ -62,7 +62,6 @@ dependencies:
       - accelerate==0.27.2
       - certifi==2024.2.2
       - charset-normalizer==3.3.2
-      - diffusers==0.26.0.dev0
       - e==1.4.5
       - filelock==3.13.1
       - fsspec==2024.2.0

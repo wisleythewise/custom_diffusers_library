@@ -1,6 +1,6 @@
 # Import pipeline_stable_video_diffusion
-from diffusers import StableVideoDiffusionPipeline
 import torch
+from diffusers import StableVideoDiffusionPipeline
 from diffusers.utils import load_image, export_to_video
 
 pipe = StableVideoDiffusionPipeline.from_pretrained(
@@ -10,7 +10,7 @@ pipe.enable_model_cpu_offload()
 
 
 
-image = load_image("/home/wisley/diffusers/pca.png")
+image = load_image("/home/wisley/custom_diffusers_library/pca.png")
 image = image.resize((64,64))
 
 

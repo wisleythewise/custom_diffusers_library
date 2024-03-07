@@ -581,6 +581,15 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # 3. Encode input image
         image_embeddings = self._encode_image(image, device, num_videos_per_prompt, self.do_classifier_free_guidance)
 
+        # It seems that image_embeddings determines the device and dtype and device
+        if self.unet.device != image_embeddings.device or self.unet.dtype != image_embeddings.dtype:
+            self.unet = self.unet.to(device=device, dtype = image_embeddings.dtype)
+
+        if self.controlnet.device != image_embeddings.device or self.controlnet.dtype != image_embeddings.dtype:
+            self.controlnet = self.controlnet.to(device=device, dtype = image_embeddings.dtype)
+
+        if self.text_encoder.device != image_embeddings.device or self.text_encoder.dtype != image_embeddings.dtype:
+            self.text_encoder = self.text_encoder.to(device=device, dtype = image_embeddings.dtype)
 
         
         if prompt is not None:        

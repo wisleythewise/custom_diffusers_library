@@ -32,11 +32,11 @@ from diffusers import (
     UNet2DConditionModel,
     UniPCMultistepScheduler,
 )
-
+from diffusers import StableVideoDiffusionPipeline
 
 from diffusers.models.unets import UNetSpatioTemporalConditionModel
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import check_min_version, is_wandb_available, make_image_grid
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion_with_controlnet import StableVideoDiffusionPipelineWithControlNet,SpatioTemporalControlNet, CustomConditioningNet, SpatioTemporalControlNetOutput
@@ -166,7 +166,7 @@ def _encode_vae_image(
 
         with torch.no_grad(): 
 
-            print(f"this is the shape of the image: {image.shape}")
+            # print(f"this is the shape of the image: {image.shape}")
             image = image.to(device=vae.device, dtype=vae.dtype)
             image_latents = vae.encode(image.to(device=vae.device)).latent_dist.mode()
 
@@ -243,6 +243,11 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
             ).repo_id
 
     # Load the models
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
 
     # Importing the pipelines
     pipe = StableVideoDiffusionPipeline.from_pretrained(
@@ -277,6 +282,9 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     tokenizer = tokenizer,
     text_encoder = text_encoder
 )
+    
+    # move the pipeline to the device
+    pipe_with_controlnet= pipe_with_controlnet.to(device= accelerator.device, dtype=torch.float32)
  
     # set some variables
     max_train_steps = 192000
@@ -386,7 +394,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         eps=adam_epsilon,
     )
 
-    train_dataset = DiffusionDataset(json_path='./test_data_set.json')
+    train_dataset = DiffusionDataset(json_path='/mnt/e/13_Jasper_diffused_samples/complete_data_paths.json')
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -395,10 +403,6 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         batch_size=1,  # Or your preferred batch size
         num_workers=1,  # Adjust based on your setup
     )
-
-
-    train_dataset = make_train_dataset(args, tokenizer, accelerator)
-
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -420,11 +424,6 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
 
     # Move vae, unet and text_encoder to device and cast to weight_dtype
     vae.to(accelerator.device, dtype=weight_dtype)
@@ -516,17 +515,19 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     )
 
 
-    #     latent_dict = {
-    #     "latents": latents,
-    #     "unet_encoder_hidden_states": image_embeddings,
-    #     "unet_added_time_ids": added_time_ids,
-    #     "controlnet_encoder_hidden_states": prompt_embeds if prompt is not None else image_embeddings,
-    #     "controlnet_added_time_ids": added_time_ids,
-    #     "controlnet_condition": conditioning_image,
-    # }
-
+# {
+#             "latents": latents,
+#             "unet_encoder_hidden_states": image_embeddings,
+#             "unet_added_time_ids": added_time_ids,
+#             "controlnet_encoder_hidden_states": prompt_embeds if prompt is not None else image_embeddings,
+#             "controlnet_added_time_ids": added_time_ids,
+#             "controlnet_condition": conditioning_image,
+#             "image_latents": image_latents,
+            
+#         }
 
     scheduler.set_timesteps(25, device=accelerator.device)
+    timesteps = scheduler.timesteps
 
 
     image_logs = None
@@ -535,19 +536,20 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
             with accelerator.accumulate(controlnet):
                 
                 # Get the timestep
-                timestep = torch.randint(0, scheduler.config.num_train_timesteps, (1,), device=accelerator.device)
+                random_idx = torch.randint(0, 25, (1,))
+                timestep = timesteps[random_idx]
                 
                 # Get all the inputs
-                inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['prompt'], batch['conditioning_image'])
+                inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'])
                 
                 # Convert images to latent space
                 latents = encode_batch(batch["ground_truth"], vae)
 
                 # make sure the latents are on the correct device and dtype
-                latents = latents.to(device=accelerator.device, dtype=accelerator.dtype)
+                latents = latents.to(device=accelerator.device, dtype=weight_dtype)
                 
-                latent_model_input = torch.cat([latents] * 2) 
-                latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)
+                # latent_model_input = torch.cat([latents] * 2) 
+                latent_model_input = scheduler.scale_model_input(latents, timestep.item())
 
                 noise_for_video = torch.randn_like(latent_model_input, device=accelerator.device)
                 noise_for_image = torch.zeros_like(inputs['image_latents'], device=accelerator.device)
@@ -559,7 +561,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # Sample noise that we'll add to the latents
                 
                 # Sample a random timestep for each image
-                timestep = timestep.long()
+                
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
@@ -633,12 +635,12 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         controlnet.save_pretrained(output_dir)
 
         if True:
-            save_model_card(
-                repo_id,
-                image_logs=image_logs,
-                base_model=pretrained_model_name_or_path,
-                repo_folder=output_dir,
-            )
+            # save_model_card(
+            #     repo_id,
+            #     image_logs=image_logs,
+            #     base_model=pretrained_model_name_or_path,
+            #     repo_folder=output_dir,
+            # )
             upload_folder(
                 repo_id=repo_id,
                 folder_path=output_dir,
@@ -648,3 +650,11 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
     accelerator.end_training()
 
+if __name__ == "__main__":
+    main(
+        output_dir="/mnt/e/13_Jasper_diffused_samples/training/output",
+        logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
+        gradient_accumulation_steps=4,
+        mixed_precision="fp16",
+        hub_model_id="temporalControlNet",
+    )

@@ -1448,13 +1448,20 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
         self._guidance_scale = guidance_scale
 
+
+
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         self._num_timesteps = len(timesteps)
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+
+                # Print the arguments shape and value of t
+                print(f"Shape of latent_model_input: {latent_model_input.shape}")
+                print(f"Value of t: {t}")
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 # Concatenate image_latents over channels dimention

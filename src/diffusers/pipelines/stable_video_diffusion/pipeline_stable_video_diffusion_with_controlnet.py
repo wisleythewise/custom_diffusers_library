@@ -857,6 +857,9 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         num_videos_per_prompt,
         do_classifier_free_guidance,
     ):
+        
+
+        print(f"this is the shape of the image: {image.shape}")
         image = image.to(device=device)
         image_latents = self.vae.encode(image).latent_dist.mode()
 
@@ -1167,7 +1170,13 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
         # Repeat the image latents for each frame so we can concatenate them with the noise
         # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
+        
+        # Print the shape of the image latents before the unsqueeze
+        print(f"Shape of image latents before the unsqueeze: {image_latents.shape}")
         image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
+
+        # Print the shape of the image latents after the unsqueeze
+        print(f"Shape of image latents after the unsqueeze: {image_latents.shape}")
 
         # 5. Get Added Time IDs
         added_time_ids = self._get_add_time_ids(
@@ -1395,7 +1404,11 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
         # Repeat the image latents for each frame so we can concatenate them with the noise
         # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
+        # print(f"Shape of image latents before the unsqueeze: {image_latents.shape}")
         image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
+
+        # Print the shape of the image latents after the unsqueeze
+        # print(f"Shape of image latents after the unsqueeze: {image_latents.shape}")
 
         # 5. Get Added Time IDs
         added_time_ids = self._get_add_time_ids(

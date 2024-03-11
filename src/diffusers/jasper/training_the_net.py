@@ -51,6 +51,9 @@ from diffusers import DiffusionPipeline
 # wandb login 
 # wandb api e22ca6359f013b2748d82d61417b843a3b9e74be
 
+# accelerate config
+# accelerate config default
+
 if is_wandb_available():
     import wandb
 
@@ -223,6 +226,51 @@ def collate_fn(examples):
         "input_ids": input_ids,
     }
 
+
+def _encode_vae_image(
+
+        image: torch.Tensor,
+        vae
+    ):
+
+        with torch.no_grad(): 
+
+            print(f"this is the shape of the image: {image.shape}")
+            image = image.to(device=vae.device, dtype=vae.dtype)
+            image_latents = vae.encode(image.to(device=vae.device)).latent_dist.mode()
+
+
+
+            # duplicate image_latents for each generation per prompt, using mps friendly method
+            image_latents = image_latents.repeat(1, 1, 1, 1)
+
+            return image_latents
+
+def encode_batch(images, vae ):
+    outputs = []  # Initialize an empty list to store each output
+
+
+    # Loop through each image in the pseudo_image tensor
+    for i in range(images.shape[0]):
+        output = _encode_vae_image(
+            images[i].unsqueeze(0),  # Unsqueeze to add the batch dimension back
+            vae=vae
+        )
+        outputs.append(output)  # Append the output to the list
+
+    # Concatenate all outputs along the 0 dimension
+    final_output = torch.cat(outputs, dim=0)
+    final_output = final_output.unsqueeze(0)
+
+    if True:
+        negative_image_latents = torch.zeros_like(final_output)
+
+        # For classifier free guidance, we need to do two forward passes.
+        # Here we concatenate the unconditional and text embeddings into a single batch
+        # to avoid doing two forward passes
+        final_output = torch.cat([negative_image_latents, final_output])
+
+    return final_output
 
 
 def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, hub_model_id):
@@ -555,24 +603,32 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 timestep = torch.randint(0, scheduler.config.num_train_timesteps, (1,), device=accelerator.device)
                 
                 # Get all the inputs
-                inputs = pipe_with_controlnet.prepare_input_for_forward(image, prompt, conditioning_image)
-                # Convert images to latent space
+                inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['prompt'], batch['conditioning_image'])
                 
-                latent_model_input = torch.cat([inputs['latents']] * 2) 
+                # Convert images to latent space
+                latents = encode_batch(batch["ground_truth"], vae)
+
+                # make sure the latents are on the correct device and dtype
+                latents = latents.to(device=accelerator.device, dtype=accelerator.dtype)
+                
+                latent_model_input = torch.cat([latents] * 2) 
                 latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)
 
+                noise_for_video = torch.randn_like(latent_model_input, device=accelerator.device)
+                noise_for_image = torch.zeros_like(inputs['image_latents'], device=accelerator.device)
+                noise_total = torch.cat([noise_for_video, noise_for_image], dim=2)
+                
                 # Concatenate image_latents over channels dimention
                 latent_model_input = torch.cat([latent_model_input, inputs['image_latents']], dim=2)
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latent_model_input, device=accelerator.device)
                 
                 # Sample a random timestep for each image
                 timestep = timestep.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_latents = scheduler.add_noise(latent_model_input, noise, timestep)
+                noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
 
 
                 down_block_res_samples, mid_block_res_sample = controlnet.forward(
@@ -595,7 +651,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     return_dict=False,
                 )[0]
 
-                target = noise
+                target = noise_for_video
 
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 

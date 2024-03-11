@@ -5,7 +5,7 @@ import os
 import random
 import shutil
 from pathlib import Path
-
+from typing import Optional
 import accelerate
 import numpy as np
 import torch
@@ -32,19 +32,66 @@ from diffusers import (
     UNet2DConditionModel,
     UniPCMultistepScheduler,
 )
+
+
+from diffusers.models.unets import UNetSpatioTemporalConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
+from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion_with_controlnet import StableVideoDiffusionPipelineWithControlNet,SpatioTemporalControlNet, CustomConditioningNet, SpatioTemporalControlNetOutput
+import gc
+from diffusers import DiffusionPipeline
 
 
 # We must login into wandb and huggingface
 # huggingface-cli login
+# huggingface-cli api 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
+
 # wandb login 
+# wandb api e22ca6359f013b2748d82d61417b843a3b9e74be
 
 if is_wandb_available():
     import wandb
 
+logger = get_logger(__name__)
+
+
+def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=None):
+    img_str = ""
+    if image_logs is not None:
+        img_str = "You can find some example images below.\n"
+        for i, log in enumerate(image_logs):
+            images = log["images"]
+            validation_prompt = log["validation_prompt"]
+            validation_image = log["validation_image"]
+            validation_image.save(os.path.join(repo_folder, "image_control.png"))
+            img_str += f"prompt: {validation_prompt}\n"
+            images = [validation_image] + images
+            image_grid(images, 1, len(images)).save(os.path.join(repo_folder, f"images_{i}.png"))
+            img_str += f"![images_{i})](./images_{i}.png)\n"
+
+    yaml = f"""
+---
+license: creativeml-openrail-m
+base_model: {base_model}
+tags:
+- stable-diffusion
+- stable-diffusion-diffusers
+- text-to-image
+- diffusers
+- controlnet
+inference: true
+---
+    """
+    model_card = f"""
+# controlnet-{repo_id}
+
+These are controlnet weights trained on {base_model} with new type of conditioning.
+{img_str}
+"""
+    with open(os.path.join(repo_folder, "README.md"), "w") as f:
+        f.write(yaml + model_card)
 
 def make_train_dataset(args, tokenizer, accelerator):
     # Get the datasets: you can either provide your own training and evaluation files (see below)
@@ -177,7 +224,8 @@ def collate_fn(examples):
     }
 
 
-def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision,  ):
+
+def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, hub_model_id):
     logging_dir = Path(output_dir, logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=output_dir, logging_dir=logging_dir)
@@ -208,43 +256,61 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         if output_dir is not None:
             os.makedirs(output_dir, exist_ok=True)
 
-        if args.push_to_hub:
+        # Pushing to the hub
+        if True:
+            hub_token = "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"
             repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
+                repo_id=hub_model_id or Path(output_dir).name, exist_ok=True, token=hub_token
             ).repo_id
 
-    # Load the tokenizer
-    if args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, revision=args.revision, use_fast=False)
-    elif args.pretrained_model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.pretrained_model_name_or_path,
-            subfolder="tokenizer",
-            revision=args.revision,
-            use_fast=False,
-        )
+    # Load the models
 
-    # import correct text encoder class
-    text_encoder_cls = import_model_class_from_model_name_or_path(args.pretrained_model_name_or_path, args.revision)
+    # Importing the pipelines
+    pipe = StableVideoDiffusionPipeline.from_pretrained(
+        "stabilityai/stable-video-diffusion-img2vid-xt", torch_dtype=torch.float16, variant="fp16"
+    )
+    pipeline = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-2")
 
-    # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
-    text_encoder = text_encoder_cls.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
-    vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant
-    )
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
-    )
 
-    if args.controlnet_model_name_or_path:
-        logger.info("Loading existing controlnet weights")
-        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
-    else:
-        logger.info("Initializing controlnet weights from unet")
-        controlnet = ControlNetModel.from_unet(unet)
+    # Getting the models
+    unet_weights = pipe.unet.state_dict()
+    my_net = UNetSpatioTemporalConditionModel()
+    my_net.load_state_dict(unet_weights)
+    control_net = SpatioTemporalControlNet.from_unet(my_net) 
+
+    vae = pipe.vae
+    image_encoder = pipe.image_encoder
+    unet=my_net
+    scheduler=pipe.scheduler
+    feature_extractor=pipe.feature_extractor
+    controlnet=control_net
+    tokenizer = pipeline.tokenizer
+    text_encoder = pipeline.text_encoder
+
+    # Initialize a controlnet_pipeline so we can use al the functinos
+    pipe_with_controlnet = StableVideoDiffusionPipelineWithControlNet(
+    vae = pipe.vae,
+    image_encoder = image_encoder,
+    unet=my_net,
+    scheduler=scheduler,
+    feature_extractor= feature_extractor,
+    controlnet=control_net,
+    tokenizer = tokenizer,
+    text_encoder = text_encoder
+)
+ 
+    # set some variables
+    max_train_steps = 192000
+    learning_rate = 1e-5
+    lr_scheduler = "constant"
+    lr_warmup_steps = 500
+    num_train_epochs = 50
+    train_batch_size = 1
+    adam_epsilon = 1e-08
+    adam_beta1 = 0.9
+    adam_beta2 = 0.999
+    adam_weight_decay = 1e-2
+    max_grad_norm = 1.0
 
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
@@ -288,7 +354,8 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     text_encoder.requires_grad_(False)
     controlnet.train()
 
-    if args.enable_xformers_memory_efficient_attention:
+    # Allow for memory save attention
+    if True:
         if is_xformers_available():
             import xformers
 
@@ -302,8 +369,8 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
-    if args.gradient_checkpointing:
-        controlnet.enable_gradient_checkpointing()
+    # if args.gradient_checkpointing:
+    #     controlnet.enable_gradient_checkpointing()
 
     # Check that all trainable models are in full precision
     low_precision_error_string = (
@@ -316,37 +383,28 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
             f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
         )
 
-    # Enable TF32 for faster training on Ampere GPUs,
-    # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
-    if args.allow_tf32:
-        torch.backends.cuda.matmul.allow_tf32 = True
-
-    if args.scale_lr:
-        args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
-        )
-
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    if args.use_8bit_adam:
-        try:
-            import bitsandbytes as bnb
-        except ImportError:
-            raise ImportError(
-                "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-            )
+    # if args.use_8bit_adam:
+    #     try:
+    #         import bitsandbytes as bnb
+    #     except ImportError:
+    #         raise ImportError(
+    #             "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
+    #         )
 
-        optimizer_class = bnb.optim.AdamW8bit
-    else:
-        optimizer_class = torch.optim.AdamW
+    #     optimizer_class = bnb.optim.AdamW8bit
+    # else:
+    #     optimizer_class = torch.optim.AdamW
+    optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
     params_to_optimize = controlnet.parameters()
     optimizer = optimizer_class(
         params_to_optimize,
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-        eps=args.adam_epsilon,
+        lr=learning_rate,
+        betas=(adam_beta1, adam_beta2),
+        weight_decay=adam_weight_decay,
+        eps=adam_epsilon,
     )
 
     train_dataset = make_train_dataset(args, tokenizer, accelerator)
@@ -355,24 +413,21 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         train_dataset,
         shuffle=True,
         collate_fn=collate_fn,
-        batch_size=args.train_batch_size,
-        num_workers=args.dataloader_num_workers,
+        batch_size=1,
+        num_workers=1,
     )
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if args.max_train_steps is None:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
 
     lr_scheduler = get_scheduler(
-        args.lr_scheduler,
+        lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
-        num_cycles=args.lr_num_cycles,
-        power=args.lr_power,
+        num_warmup_steps=lr_warmup_steps * accelerator.num_processes,
+        num_training_steps=max_train_steps * accelerator.num_processes,
+        num_cycles=1,
+        power=1,
     )
 
     # Prepare everything with our `accelerator`.
@@ -394,132 +449,165 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     text_encoder.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
     if overrode_max_train_steps:
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        max_train_steps = num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    num_train_epochs = math.ceil(max_train_steps / num_update_steps_per_epoch)
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        tracker_config = dict(vars(args))
+        training_config = {
+                "max_train_steps": 192000,
+                "learning_rate": 1e-5,
+                "lr_scheduler": "constant",
+                "lr_warmup_steps": 500,
+                "num_train_epochs": 50,
+                "train_batch_size": 1,
+                "adam_epsilon": 1e-08,
+                "adam_beta1": 0.9,
+                "adam_beta2": 0.999,
+                "adam_weight_decay": 1e-2,
+                "max_grad_norm": 1.0,
+                # Add placeholders for any other arguments required for tracker initialization
+                "tracker_project_name": "temporalControlNet",
+                "validation_prompt": None,  # Placeholder for the argument to be popped
+                "validation_image": None    # Placeholder for the argument to be popped
+            }
+        tracker_config = training_config.copy()
 
         # tensorboard cannot handle list types for config
         tracker_config.pop("validation_prompt")
         tracker_config.pop("validation_image")
 
-        accelerator.init_trackers(args.tracker_project_name, config=tracker_config)
+        accelerator.init_trackers(tracker_config["tracker_project_name"], config=tracker_config)
 
     # Train!
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = train_batch_size * accelerator.num_processes * gradient_accumulation_steps
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
+    logger.info(f"  Num Epochs = {num_train_epochs}")
+    logger.info(f"  Instantaneous batch size per device = {train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
+    logger.info(f"  Total optimization steps = {max_train_steps}")
     global_step = 0
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
+    # if args.resume_from_checkpoint:
+    #     if args.resume_from_checkpoint != "latest":
+    #         path = os.path.basename(args.resume_from_checkpoint)
+    #     else:
+    #         # Get the most recent checkpoint
+    #         dirs = os.listdir(args.output_dir)
+    #         dirs = [d for d in dirs if d.startswith("checkpoint")]
+    #         dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+    #         path = dirs[-1] if len(dirs) > 0 else None
 
-        if path is None:
-            accelerator.print(
-                f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
-            )
-            args.resume_from_checkpoint = None
-            initial_global_step = 0
-        else:
-            accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
-            global_step = int(path.split("-")[1])
+    #     if path is None:
+    #         accelerator.print(
+    #             f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
+    #         )
+    #         args.resume_from_checkpoint = None
+    #         initial_global_step = 0
+    #     else:
+    #         accelerator.print(f"Resuming from checkpoint {path}")
+    #         accelerator.load_state(os.path.join(args.output_dir, path))
+    #         global_step = int(path.split("-")[1])
 
-            initial_global_step = global_step
-            first_epoch = global_step // num_update_steps_per_epoch
-    else:
-        initial_global_step = 0
+    #         initial_global_step = global_step
+    #         first_epoch = global_step // num_update_steps_per_epoch
+    # else:
+    initial_global_step = 0
 
     progress_bar = tqdm(
-        range(0, args.max_train_steps),
+        range(0, max_train_steps),
         initial=initial_global_step,
         desc="Steps",
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
     )
 
+
+    #     latent_dict = {
+    #     "latents": latents,
+    #     "unet_encoder_hidden_states": image_embeddings,
+    #     "unet_added_time_ids": added_time_ids,
+    #     "controlnet_encoder_hidden_states": prompt_embeds if prompt is not None else image_embeddings,
+    #     "controlnet_added_time_ids": added_time_ids,
+    #     "controlnet_condition": conditioning_image,
+    # }
+
+
+    scheduler.set_timesteps(25, device=accelerator.device)
+
+
     image_logs = None
-    for epoch in range(first_epoch, args.num_train_epochs):
+    for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(controlnet):
+                
+                # Get the timestep
+                timestep = torch.randint(0, scheduler.config.num_train_timesteps, (1,), device=accelerator.device)
+                
+                # Get all the inputs
+                inputs = pipe_with_controlnet.prepare_input_for_forward(image, prompt, conditioning_image)
                 # Convert images to latent space
-                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                latents = latents * vae.config.scaling_factor
+                
+                latent_model_input = torch.cat([inputs['latents']] * 2) 
+                latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)
+
+                # Concatenate image_latents over channels dimention
+                latent_model_input = torch.cat([latent_model_input, inputs['image_latents']], dim=2)
 
                 # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
+                noise = torch.randn_like(latent_model_input, device=accelerator.device)
+                
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = timesteps.long()
+                timestep = timestep.long()
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                noisy_latents = scheduler.add_noise(latent_model_input, noise, timestep)
 
-                # Get the text embedding for conditioning
-                encoder_hidden_states = text_encoder(batch["input_ids"], return_dict=False)[0]
 
-                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-
-                down_block_res_samples, mid_block_res_sample = controlnet(
+                down_block_res_samples, mid_block_res_sample = controlnet.forward(
                     noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    controlnet_cond=controlnet_image,
+                    timestep,
+                    encoder_hidden_states= inputs["controlnet_encoder_hidden_states"], 
+                    added_time_ids= inputs['controlnet_added_time_ids'],
                     return_dict=False,
+                    controlnet_condition = inputs['controlnet_condition']
                 )
 
-                # Predict the noise residual
+                # predict the noise residual
                 model_pred = unet(
                     noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    down_block_additional_residuals=[
-                        sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                    ],
-                    mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
+                    timestep,
+                    encoder_hidden_states= inputs["unet_encoder_hidden_states"],
+                    added_time_ids= inputs['unet_added_time_ids'],
+                    down_block_additional_residuals= down_block_res_samples,
+                    mid_block_additional_residual = mid_block_res_sample,
                     return_dict=False,
                 )[0]
 
-                # Get the target for loss depending on the prediction type
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                target = noise
+
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = controlnet.parameters()
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(params_to_clip, max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=args.set_grads_to_none)
+
+                # ISSUE
+                optimizer.zero_grad(set_to_none=True)
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -527,67 +615,42 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
+                    if global_step % 10 == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
+                        if True :
+                            checkpoints = os.listdir(output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        save_path = os.path.join(output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
-                        image_logs = log_validation(
-                            vae,
-                            text_encoder,
-                            tokenizer,
-                            unet,
-                            controlnet,
-                            args,
-                            accelerator,
-                            weight_dtype,
-                            global_step,
-                        )
+
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
-            if global_step >= args.max_train_steps:
+            if global_step >= max_train_steps:
                 break
 
     # Create the pipeline using using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         controlnet = unwrap_model(controlnet)
-        controlnet.save_pretrained(args.output_dir)
+        controlnet.save_pretrained(output_dir)
 
-        if args.push_to_hub:
+        if True:
             save_model_card(
                 repo_id,
                 image_logs=image_logs,
-                base_model=args.pretrained_model_name_or_path,
-                repo_folder=args.output_dir,
+                base_model=pretrained_model_name_or_path,
+                repo_folder=output_dir,
             )
             upload_folder(
                 repo_id=repo_id,
-                folder_path=args.output_dir,
+                folder_path=output_dir,
                 commit_message="End of training",
                 ignore_patterns=["step_*", "epoch_*"],
             )

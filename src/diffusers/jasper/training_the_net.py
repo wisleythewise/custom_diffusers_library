@@ -284,7 +284,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 )
     
     # move the pipeline to the device
-    pipe_with_controlnet= pipe_with_controlnet.to(device= accelerator.device, dtype=torch.float32)
+    pipe_with_controlnet= pipe_with_controlnet.to(device= accelerator.device, dtype=torch.float16)
  
     # set some variables
     max_train_steps = 192000
@@ -342,22 +342,22 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     controlnet.train()
 
     # Allow for memory save attention
+    # if True:
+    #     if is_xformers_available():
+    #         import xformers
+
+    #         xformers_version = version.parse(xformers.__version__)
+    #         if xformers_version == version.parse("0.0.16"):
+    #             logger.warn(
+    #                 "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+    #             )
+    #         unet.enable_xformers_memory_efficient_attention()
+    #         controlnet.enable_xformers_memory_efficient_attention()
+    #     else:
+    #         raise ValueError("xformers is not available. Make sure it is installed correctly")
+
     if True:
-        if is_xformers_available():
-            import xformers
-
-            xformers_version = version.parse(xformers.__version__)
-            if xformers_version == version.parse("0.0.16"):
-                logger.warn(
-                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
-                )
-            unet.enable_xformers_memory_efficient_attention()
-            controlnet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
-
-    # if args.gradient_checkpointing:
-    #     controlnet.enable_gradient_checkpointing()
+        controlnet.enable_gradient_checkpointing()
 
     # Check that all trainable models are in full precision
     low_precision_error_string = (
@@ -365,24 +365,24 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         " doing mixed precision training, copy of the weights should still be float32."
     )
 
-    if unwrap_model(controlnet).dtype != torch.float32:
-        raise ValueError(
-            f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
-        )
+    # if unwrap_model(controlnet).dtype != torch.float32:
+    #     raise ValueError(
+    #         f"Controlnet loaded as datatype {unwrap_model(controlnet).dtype}. {low_precision_error_string}"
+    #     )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    # if args.use_8bit_adam:
-    #     try:
-    #         import bitsandbytes as bnb
-    #     except ImportError:
-    #         raise ImportError(
-    #             "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-    #         )
+    if True:
+        try:
+            import bitsandbytes as bnb
+        except ImportError:
+            raise ImportError(
+                "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
+            )
 
-    #     optimizer_class = bnb.optim.AdamW8bit
-    # else:
-    #     optimizer_class = torch.optim.AdamW
-    optimizer_class = torch.optim.AdamW
+        optimizer_class = bnb.optim.AdamW8bit
+    else:
+        optimizer_class = torch.optim.AdamW
+    # optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
     params_to_optimize = controlnet.parameters()
@@ -401,7 +401,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         shuffle=True,
         collate_fn=collate_fn,
         batch_size=1,  # Or your preferred batch size
-        num_workers=1,  # Adjust based on your setup
+        num_workers=0,  # Adjust based on your setup
     )
 
     # Scheduler and math around the number of training steps.
@@ -578,6 +578,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 )
 
                 # predict the noise residual
+
                 model_pred = unet(
                     noisy_latents,
                     timestep,
@@ -600,7 +601,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 lr_scheduler.step()
 
                 # ISSUE
-                optimizer.zero_grad(set_to_none=True)
+                # optimizer.zero_grad(set_to_none=True)
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -651,6 +652,13 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     accelerator.end_training()
 
 if __name__ == "__main__":
+    import torch
+    print(torch.__version__)
+    print(torch.version.cuda)
+    import xformers
+    print(xformers.__version__)
+
+
     main(
         output_dir="/mnt/e/13_Jasper_diffused_samples/training/output",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",

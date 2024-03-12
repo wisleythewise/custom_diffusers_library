@@ -92,10 +92,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class CustomConditioningNet(nn.Module):
-    def __init__(self):
+    def __init__(self,output_size=(72, 128)):
         super().__init__()
 
-        
+        self.output_size = output_size
 
         # Initial convolution to match the first target channel dimension
         self.initial_conv = nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1)
@@ -123,7 +123,7 @@ class CustomConditioningNet(nn.Module):
 
         # Final adjustment to target spatial dimensions
         # Considering a final adaptive pooling layer to ensure matching to the target spatial size (64x64)
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((72, 128))
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(self.output_size)
 
 
     def cast_model_to(self, device, dtype):
@@ -139,6 +139,11 @@ class CustomConditioningNet(nn.Module):
         - The model with its parameters and buffers cast to the specified device and data type.
         """
         # Cast all parameters to the specified device and dtype.
+
+        # Make sure grad is enabled
+        for param in self.parameters():
+            param.requires_grad = True 
+
         for param in self.parameters():
             param.data = param.data.to(device=device, dtype=dtype)
             if param.requires_grad and param.grad is not None:
@@ -426,6 +431,71 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
         self.set_attn_processor(processor)
 
+    def set_attention_slice(self, slice_size: Union[str, int, List[int]]) -> None:
+        r"""
+        Enable sliced attention computation.
+
+        When this option is enabled, the attention module splits the input tensor in slices to compute attention in
+        several steps. This is useful for saving some memory in exchange for a small decrease in speed.
+
+        Args:
+            slice_size (`str` or `int` or `list(int)`, *optional*, defaults to `"auto"`):
+                When `"auto"`, input to the attention heads is halved, so attention is computed in two steps. If
+                `"max"`, maximum amount of memory is saved by running only one slice at a time. If a number is
+                provided, uses as many slices as `attention_head_dim // slice_size`. In this case, `attention_head_dim`
+                must be a multiple of `slice_size`.
+        """
+        sliceable_head_dims = []
+
+        def fn_recursive_retrieve_sliceable_dims(module: torch.nn.Module):
+            if hasattr(module, "set_attention_slice"):
+                sliceable_head_dims.append(module.sliceable_head_dim)
+
+            for child in module.children():
+                fn_recursive_retrieve_sliceable_dims(child)
+
+        # retrieve number of attention layers
+        for module in self.children():
+            fn_recursive_retrieve_sliceable_dims(module)
+
+        num_sliceable_layers = len(sliceable_head_dims)
+
+        if slice_size == "auto":
+            # half the attention head size is usually a good trade-off between
+            # speed and memory
+            slice_size = [dim // 2 for dim in sliceable_head_dims]
+        elif slice_size == "max":
+            # make smallest slice possible
+            slice_size = num_sliceable_layers * [1]
+
+        slice_size = num_sliceable_layers * [slice_size] if not isinstance(slice_size, list) else slice_size
+
+        if len(slice_size) != len(sliceable_head_dims):
+            raise ValueError(
+                f"You have provided {len(slice_size)}, but {self.config} has {len(sliceable_head_dims)} different"
+                f" attention layers. Make sure to match `len(slice_size)` to be {len(sliceable_head_dims)}."
+            )
+
+        for i in range(len(slice_size)):
+            size = slice_size[i]
+            dim = sliceable_head_dims[i]
+            if size is not None and size > dim:
+                raise ValueError(f"size {size} has to be smaller or equal to {dim}.")
+
+        # Recursively walk through all the children.
+        # Any children which exposes the set_attention_slice method
+        # gets the message
+        def fn_recursive_set_attention_slice(module: torch.nn.Module, slice_size: List[int]):
+            if hasattr(module, "set_attention_slice"):
+                module.set_attention_slice(slice_size.pop())
+
+            for child in module.children():
+                fn_recursive_set_attention_slice(child, slice_size)
+
+        reversed_slice_size = list(reversed(slice_size))
+        for module in self.children():
+            fn_recursive_set_attention_slice(module, reversed_slice_size)
+
     def _set_gradient_checkpointing(self, module, value=False):
         if hasattr(module, "gradient_checkpointing"):
             module.gradient_checkpointing = value
@@ -515,7 +585,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         # `Timesteps` does not contain any weights and will always return f32 tensors
         # but time_embedding might actually be running in fp16. so we need to cast here.
         # there might be better ways to encapsulate this.
-        t_emb = t_emb.to(dtype=sample.dtype)
+        t_emb = t_emb.to(dtype=sample.dtype , device = sample.device)
 
         emb = self.time_embedding(t_emb)
 
@@ -527,9 +597,12 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
         # Flatten the batch and frames dimensions
         # sample: [batch, frames, channels, height, width] -> [batch * frames, channels, height, width]
-        sample = sample.flatten(0, 1)
 
         
+
+
+        sample = sample.flatten(0, 1)
+        sample = self.conv_in(sample)
         # Repeat the embeddings num_video_frames times
         # emb: [batch, channels] -> [batch * frames, channels]
         emb = emb.repeat_interleave(num_frames, dim=0).to(sample.device)
@@ -550,12 +623,14 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         # Print the shape of the sample
         # 2. pre-process
         # print(f"Sample shape before the conversion: {sample.shape}")
-        sample = self.conv_in(sample)
+            # Define the target dimensions
         # print(f"Sample shape after the conversion: {sample.shape}")
 
 
         # Make sure the controlnet_condition model and the controlet have if same type
         # And are running on the same device
+
+
 
         if controlnet_condition is not None: 
 
@@ -656,8 +731,14 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
         mid_block_res_sample = self.controlnet_mid_block(sample)
 
+
+        
         down_block_res_samples = [sample for sample in down_block_res_samples]
+        # Print all the shapes of the down_block_res_samples
+
         mid_block_res_sample = mid_block_res_sample
+    
+        # pritn the shape of the mid_block_res_sample
 
         if not return_dict:
             return (down_block_res_samples, mid_block_res_sample)
@@ -680,7 +761,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         
 
         # conditioning net
-        condition_net = CustomConditioningNet()
+        condition_net =  CustomConditioningNet( output_size=(36,64) )
 
         controlnet = cls(
             in_channels=unet.config.in_channels,

@@ -490,12 +490,17 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
                 
                 # Check the shape of the down block sample and the down block additional residual
                 # If they are not the same throw an error with the shapes
+                if down_block_res_sample.shape != down_block_additional_residual.shape:
+                    # uss the bilinear interpolate function to fix this
+                    down_block_additional_residual = torch.nn.functional.interpolate(down_block_additional_residual, size=down_block_res_sample.shape[2:], mode='bilinear', align_corners=False)
+
 
                 if down_block_res_sample.shape != down_block_additional_residual.shape:
                     raise ValueError(
                         f"Down block res sample shape {down_block_res_sample.shape} and down block additional residual shape {down_block_additional_residual.shape} are not the same"
                     )
                 down_block_res_sample = down_block_res_sample + down_block_additional_residual
+                down_block_res_sample = down_block_res_sample.to(dtype=emb.dtype, device=emb.device)
                 new_down_block_res_samples = new_down_block_res_samples + (down_block_res_sample,)
 
             down_block_res_samples = new_down_block_res_samples
@@ -511,6 +516,11 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         if self.controlnet_enabled and mid_block_additional_residual is not None:
             # Check the shape of the mid block sample and the mid block additional residual
             # If they are not the same throw an error with the shapes
+
+            if sample.shape != mid_block_additional_residual.shape:
+                # uss the bilinear interpolate function to fix this
+                mid_block_additional_residual = torch.nn.functional.interpolate(mid_block_additional_residual, size=sample.shape[2:], mode='bilinear', align_corners=False)
+
             if sample.shape != mid_block_additional_residual.shape:
                 raise ValueError(
                     f"Mid block sample shape {sample.shape} and mid block additional residual shape {mid_block_additional_residual.shape} are not the same"
@@ -518,6 +528,8 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
 
             sample = sample + mid_block_additional_residual
+            sample = sample.to(dtype=emb.dtype, device=emb.device)
+             
 
 
 
@@ -526,8 +538,10 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
 
-            # Print the iteration
-            # print(f"This is the iteration {i}")
+            # everything to the correct device
+            encoder_hidden_states = encoder_hidden_states.to(dtype=emb.dtype, device=emb.device)
+            
+            
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
                 sample = upsample_block(
                     hidden_states=sample,

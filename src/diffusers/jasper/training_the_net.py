@@ -243,11 +243,11 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
             ).repo_id
 
     # Load the models
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
+    weight_dtype = torch.float16
+    # if accelerator.mixed_precision == "fp16":
+    #     weight_dtype = torch.float16
+    # elif accelerator.mixed_precision == "bf16":
+    #     weight_dtype = torch.bfloat16
 
     # Importing the pipelines
     pipe = StableVideoDiffusionPipeline.from_pretrained(
@@ -260,7 +260,13 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     unet_weights = pipe.unet.state_dict()
     my_net = UNetSpatioTemporalConditionModel()
     my_net.load_state_dict(unet_weights)
+
+
     control_net = SpatioTemporalControlNet.from_unet(my_net) 
+    
+    # Make them f16
+    my_net = my_net.half()
+    control_net = control_net.half()   
 
     vae = pipe.vae
     image_encoder = pipe.image_encoder
@@ -407,7 +413,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
-
+    print(f"accelerator num processes: {accelerator.num_processes}")
     lr_scheduler = get_scheduler(
         lr_scheduler,
         optimizer=optimizer,
@@ -530,6 +536,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     timesteps = scheduler.timesteps
 
 
+
     image_logs = None
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
@@ -552,6 +559,9 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 latent_model_input = scheduler.scale_model_input(latents, timestep.item())
 
                 noise_for_video = torch.randn_like(latent_model_input, device=accelerator.device)
+
+                # enable grad for the noise
+                noise_for_video.requires_grad = True
                 noise_for_image = torch.zeros_like(inputs['image_latents'], device=accelerator.device)
                 noise_total = torch.cat([noise_for_video, noise_for_image], dim=2)
                 
@@ -566,10 +576,17 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
+                noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
 
+
+                sample_control = noisy_latents.reshape(50,8,72,128)
+                sample_downsampled = torch.nn.functional.interpolate(sample_control, scale_factor=0.5, mode='nearest')
+
+                # movce back
+                sample_downsampled = sample_downsampled.reshape(2,25,8,36,64)
 
                 down_block_res_samples, mid_block_res_sample = controlnet.forward(
-                    noisy_latents,
+                    sample_downsampled.to(device = accelerator.device, dtype = weight_dtype),
                     timestep,
                     encoder_hidden_states= inputs["controlnet_encoder_hidden_states"], 
                     added_time_ids= inputs['controlnet_added_time_ids'],
@@ -579,25 +596,39 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
                 # predict the noise residual
 
-                model_pred = unet(
-                    noisy_latents,
-                    timestep,
-                    encoder_hidden_states= inputs["unet_encoder_hidden_states"],
-                    added_time_ids= inputs['unet_added_time_ids'],
-                    down_block_additional_residuals= down_block_res_samples,
-                    mid_block_additional_residual = mid_block_res_sample,
-                    return_dict=False,
-                )[0]
+
+                with torch.no_grad():
+                    model_pred = unet(
+                        noisy_latents,
+                        timestep,
+                        encoder_hidden_states= inputs["unet_encoder_hidden_states"],
+                        added_time_ids= inputs['unet_added_time_ids'],
+                        down_block_additional_residuals= down_block_res_samples,
+                        mid_block_additional_residual = mid_block_res_sample,
+                        return_dict=False,
+                    )[0]
 
                 target = noise_for_video
 
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
-                accelerator.backward(loss)
+
+                # accelerator.backward(loss)
+                # if accelerator.sync_gradients:
+                #     params_to_clip = controlnet.parameters()
+                #     accelerator.clip_grad_norm_(params_to_clip, max_grad_norm)
+                
+                # optimizer.step()
+        
+                # lr_scheduler.step()
+
+                scaled_loss = accelerator.scaler.scale(loss)
+                accelerator.backward(scaled_loss)
                 if accelerator.sync_gradients:
                     params_to_clip = controlnet.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, max_grad_norm)
-                optimizer.step()
+                accelerator.scaler.step(optimizer)
+                accelerator.scaler.update()
                 lr_scheduler.step()
 
                 # ISSUE

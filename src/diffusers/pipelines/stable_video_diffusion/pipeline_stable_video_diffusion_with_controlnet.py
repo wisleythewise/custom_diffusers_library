@@ -142,6 +142,7 @@ class CustomConditioningNet(nn.Module):
 
         # Make sure grad is enabled
         for param in self.parameters():
+
             param.requires_grad = True 
 
         for param in self.parameters():
@@ -239,7 +240,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         cross_attention_dim: Union[int, Tuple[int]] = 1024,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
         num_attention_heads: Union[int, Tuple[int]] = (5, 10, 10, 20),
-        conditioning_embedding = None
+        conditioning_net_config = None
 
     ):
         super().__init__()
@@ -248,7 +249,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
 
         self.sample_size = sample_size
-        self.conditioning_embedding = conditioning_embedding
+        self.conditioning_net_config = conditioning_net_config
 
         # input
         self.conv_in = nn.Conv2d(
@@ -257,6 +258,15 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             kernel_size=3,
             padding=1,
         )
+
+
+        channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280]
+
+        # Initialize controlnet_down_blocks using nn.ModuleList
+        self.controlnet_down_blocks = nn.ModuleList([
+            zero_module(nn.Conv2d(channels, channels, kernel_size=1)) for channels in channel_sizes
+        ])
+
 
         # time
         time_embed_dim = block_out_channels[0] * 4
@@ -271,8 +281,18 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
 
         output_channel = block_out_channels[0]
+
+        # Inside SpatioTemporalControlNet __init__ method
+        self.config.conditioning_net_config = {
+            "output_size": (36, 64),
+            # Add other necessary configuration parameters here
+        }
+
+        # Then, you initialize CustomConditioningNet inside SpatioTemporalControlNet using this config
+        self.conditioning_embedding = CustomConditioningNet(**self.config.conditioning_net_config)
+
         
-        self.controlnet_down_blocks = None
+   
         self.down_blocks = nn.ModuleList([])
 
 
@@ -696,21 +716,23 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         # 5. Control net blocks
 
         # initialize the controlnet_down_block_res_samples of it is on embpy nn.ModuleList
-        if self.controlnet_down_blocks is None:
-            self.controlnet_down_blocks = nn.ModuleList([])
+        # if self.controlnet_down_blocks is None:
+            # self.controlnet_down_blocks = nn.ModuleList([])
 
 
-            for down_block_res_sample in down_block_res_samples:
-                # Determine the current number of channels in the tensor
-                current_channels = down_block_res_sample.size(1)
+            # for down_block_res_sample in down_block_res_samples:
+            #     # Determine the current number of channels in the tensor
+            #     current_channels = down_block_res_sample.size(1)
+
+            #     # print(f"Current channels: {current_channels}")
                 
-                # Dynamically create a zero convolution block for the current tensor
-                controlnet_block = nn.Conv2d(current_channels, current_channels, kernel_size=1)
-                controlnet_block = zero_module(controlnet_block).to(down_block_res_sample.device, dtype=sample.dtype)
+            #     # Dynamically create a zero convolution block for the current tensor
+            #     controlnet_block = nn.Conv2d(current_channels, current_channels, kernel_size=1)
+            #     controlnet_block = zero_module(controlnet_block).to(down_block_res_sample.device, dtype=sample.dtype)
             
                 
-                # Store the processed sample for further use
-                self.controlnet_down_blocks.append(controlnet_block)
+            #     # Store the processed sample for further use
+            #     self.controlnet_down_blocks.append(controlnet_block)
     
 
         controlnet_down_block_res_samples = ()
@@ -760,8 +782,6 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
         
 
-        # conditioning net
-        condition_net =  CustomConditioningNet( output_size=(36,64) )
 
         controlnet = cls(
             in_channels=unet.config.in_channels,
@@ -773,7 +793,10 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             cross_attention_dim=unet.config.cross_attention_dim,
             transformer_layers_per_block=unet.config.transformer_layers_per_block,
             num_attention_heads=unet.config.num_attention_heads,
-            conditioning_embedding = condition_net
+               conditioning_net_config={
+                "output_size": (36, 64),
+                # Include other necessary parameters for CustomConditioningNet initialization
+            } 
         )
 
         if load_weights_from_unet:
@@ -932,7 +955,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
 
         bs_embed, seq_len, _ = prompt_embeds.shape
-        print(f"Shape of prompt embeds: {prompt_embeds.shape} {bs_embed} {seq_len}")
+        # print(f"Shape of prompt embeds: {prompt_embeds.shape} {bs_embed} {seq_len}")
 
         # duplicate text embeddings for each generation per prompt, using mps friendly method
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
@@ -1047,7 +1070,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
     ):
         
 
-        print(f"this is the shape of the image: {image.shape}")
+        # print(f"this is the shape of the image: {image.shape}")
         image = image.to(device=device)
         image_latents = self.vae.encode(image).latent_dist.mode()
 
@@ -1360,11 +1383,11 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
         
         # Print the shape of the image latents before the unsqueeze
-        print(f"Shape of image latents before the unsqueeze: {image_latents.shape}")
+        # print(f"Shape of image latents before the unsqueeze: {image_latents.shape}")
         image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
 
         # Print the shape of the image latents after the unsqueeze
-        print(f"Shape of image latents after the unsqueeze: {image_latents.shape}")
+        # print(f"Shape of image latents after the unsqueeze: {image_latents.shape}")
 
         # 5. Get Added Time IDs
         added_time_ids = self._get_add_time_ids(

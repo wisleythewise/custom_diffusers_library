@@ -22,7 +22,7 @@ from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer, PretrainedConfig
-
+import shutil
 import diffusers
 from diffusers import (
     AutoencoderKL,
@@ -71,7 +71,7 @@ def save_model_card(repo_id: str, image_logs=None, base_model=str, repo_folder=N
             validation_image.save(os.path.join(repo_folder, "image_control.png"))
             img_str += f"prompt: {validation_prompt}\n"
             images = [validation_image] + images
-            image_grid(images, 1, len(images)).save(os.path.join(repo_folder, f"images_{i}.png"))
+            # image_grid(images, 1, len(images)).save(os.path.join(repo_folder, f"images_{i}.png"))
             img_str += f"![images_{i})](./images_{i}.png)\n"
 
     yaml = f"""
@@ -211,7 +211,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
-        mixed_precision=mixed_precision,
+        # mixed_precision=mixed_precision,
         log_with= "wandb",
         project_config=accelerator_project_config,
     )
@@ -377,7 +377,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     #     )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    if True:
+    if False:
         try:
             import bitsandbytes as bnb
         except ImportError:
@@ -486,31 +486,23 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     first_epoch = 0
 
     # Potentially load in the weights and states from a previous save
-    # if args.resume_from_checkpoint:
-    #     if args.resume_from_checkpoint != "latest":
-    #         path = os.path.basename(args.resume_from_checkpoint)
-    #     else:
-    #         # Get the most recent checkpoint
-    #         dirs = os.listdir(args.output_dir)
-    #         dirs = [d for d in dirs if d.startswith("checkpoint")]
-    #         dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-    #         path = dirs[-1] if len(dirs) > 0 else None
+    if False:
 
-    #     if path is None:
-    #         accelerator.print(
-    #             f"Checkpoint '{args.resume_from_checkpoint}' does not exist. Starting a new training run."
-    #         )
-    #         args.resume_from_checkpoint = None
-    #         initial_global_step = 0
-    #     else:
-    #         accelerator.print(f"Resuming from checkpoint {path}")
-    #         accelerator.load_state(os.path.join(args.output_dir, path))
-    #         global_step = int(path.split("-")[1])
+        # Get the most recent checkpoint
+        dirs = os.listdir(output_dir)
+        dirs = [d for d in dirs if d.startswith("checkpoint")]
+        dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+        path = dirs[-1] if len(dirs) > 0 else None
 
-    #         initial_global_step = global_step
-    #         first_epoch = global_step // num_update_steps_per_epoch
-    # else:
-    initial_global_step = 0
+
+        accelerator.print(f"Resuming from checkpoint {path}")
+        accelerator.load_state(os.path.join(output_dir, path))
+        global_step = int(path.split("-")[1])
+
+        initial_global_step = global_step
+        first_epoch = global_step // num_update_steps_per_epoch
+    else:
+        initial_global_step = 0
 
     progress_bar = tqdm(
         range(0, max_train_steps),
@@ -535,6 +527,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     scheduler.set_timesteps(25, device=accelerator.device)
     timesteps = scheduler.timesteps
 
+    scaler = torch.cuda.amp.GradScaler(enabled = True)
 
 
     image_logs = None
@@ -617,23 +610,35 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # if accelerator.sync_gradients:
                 #     params_to_clip = controlnet.parameters()
                 #     accelerator.clip_grad_norm_(params_to_clip, max_grad_norm)
-                
+
                 # optimizer.step()
+                # # optimizer.scaler.update()
         
                 # lr_scheduler.step()
 
-                scaled_loss = accelerator.scaler.scale(loss)
-                accelerator.backward(scaled_loss)
+
+                # optimizer.zero_grad(set_to_none=True)
+
+                accelerator.backward(loss)
+
+                # Outside the `with accelerator.accumulate(controlnet):` block
+
+                # Perform gradient clipping using accelerator's utility method if available
+                # Note: This step might need adjustment based on the Accelerator's version and capabilities
                 if accelerator.sync_gradients:
                     params_to_clip = controlnet.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, max_grad_norm)
-                accelerator.scaler.step(optimizer)
-                accelerator.scaler.update()
+
+                # Use accelerator to step the optimizer and update the scaler
+                optimizer.step()
+
+                # Zero the parameter gradients
+                optimizer.zero_grad(set_to_none=True)
+
+                # Step the learning rate scheduler
                 lr_scheduler.step()
 
-                # ISSUE
-                # optimizer.zero_grad(set_to_none=True)
-
+             
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -650,6 +655,40 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                         save_path = os.path.join(output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
+
+                        # delete the oldest checkpoint if there are more than 4
+                        try:
+                            if len(checkpoints) > 4:
+                                shutil.rmtree(f'{output_dir}/{checkpoints[0]}')
+                        except Exception as e:
+                            print(e)
+
+                        checkpoint = {
+                            'epoch': epoch,
+                            'model_state_dict': controlnet.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'loss': loss,
+                            # You can include more components as needed
+                        }
+
+                        # If there are more then 4 model_checkpoints_{step}.ckpt files in the folder delete the oldest  with the lowest value for step
+
+                        # First get the amount of files in the dir
+                        dir = f'{output_dir}/test'
+                        files = os.listdir(dir)
+                        files = [f for f in files if f.startswith("model_checkpoint")]
+                        files = sorted(files, key=lambda x: int(x.split("_")[2].split(".")[0]))
+
+                        try:
+                            if len(files) > 4:
+                                # delete the file with th lowest value for step
+                                os.remove(f'{output_dir}/test/{files[0]}')
+                        except Exception as e:
+                            print(e)
+                                            
+                            
+
+                        torch.save(checkpoint, f'{output_dir}/test/model_checkpoint_{step}.ckpt')
 
 
 

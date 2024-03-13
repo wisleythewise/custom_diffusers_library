@@ -580,7 +580,11 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
                 a `tuple` is returned where the first element is the sample tensor.
         """
 
-
+        # print("Input sample:", sample.mean(), sample.std())
+        # sample_flat = sample.flatten(0, 1)
+        # print("After flattening:", sample_flat.mean(), sample_flat.std())
+        # sample_conv = self.conv_in(sample_flat)
+        # print("After initial conv:", sample_conv.mean(), sample_conv.std())
 
         # 1. time
         timesteps = timestep
@@ -1692,6 +1696,9 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     return_dict=False,
                     controlnet_condition = conditioning_image
                 )
+
+                # print(down_block_res_samplesss)
+                print(mid_block_res_samplesss.mean())
 
                 # predict the noise residual
                 noise_pred = self.unet(

@@ -423,6 +423,12 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         power=1,
     )
 
+    # Go train my boy
+    controlnet.requires_grad_(True)
+    for param in controlnet.parameters():
+        param.requires_grad = True
+
+
     # Prepare everything with our `accelerator`.
     controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         controlnet, optimizer, train_dataloader, lr_scheduler
@@ -527,7 +533,10 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     scheduler.set_timesteps(25, device=accelerator.device)
     timesteps = scheduler.timesteps
 
-    scaler = torch.cuda.amp.GradScaler(enabled = True)
+
+
+    for param in unet.parameters():
+        param.requires_grad = False
 
 
     image_logs = None
@@ -551,12 +560,12 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # latent_model_input = torch.cat([latents] * 2) 
                 latent_model_input = scheduler.scale_model_input(latents, timestep.item())
 
-                noise_for_video = torch.randn_like(latent_model_input, device=accelerator.device)
+                # noise_for_video = torch.randn_like(latent_model_input, device=accelerator.device)
 
                 # enable grad for the noise
-                noise_for_video.requires_grad = True
-                noise_for_image = torch.zeros_like(inputs['image_latents'], device=accelerator.device)
-                noise_total = torch.cat([noise_for_video, noise_for_image], dim=2)
+                # noise_for_video.requires_grad = True
+                # noise_for_image = torch.zeros_like(inputs['image_latents'], device=accelerator.device)
+                # noise_total = torch.cat([noise_for_video, noise_for_image], dim=2)
                 
                 # Concatenate image_latents over channels dimention
                 latent_model_input = torch.cat([latent_model_input, inputs['image_latents']], dim=2)
@@ -568,10 +577,9 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
+                noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
                 noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
                 noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
-
-
                 sample_control = noisy_latents.reshape(50,8,72,128)
                 sample_downsampled = torch.nn.functional.interpolate(sample_control, scale_factor=0.5, mode='nearest')
 
@@ -590,18 +598,19 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # predict the noise residual
 
 
-                with torch.no_grad():
-                    model_pred = unet(
-                        noisy_latents,
-                        timestep,
-                        encoder_hidden_states= inputs["unet_encoder_hidden_states"],
-                        added_time_ids= inputs['unet_added_time_ids'],
-                        down_block_additional_residuals= down_block_res_samples,
-                        mid_block_additional_residual = mid_block_res_sample,
-                        return_dict=False,
-                    )[0]
+                
+                model_pred = unet(
+                    noisy_latents,
+                    timestep,
+                    encoder_hidden_states= inputs["unet_encoder_hidden_states"],
+                    added_time_ids= inputs['unet_added_time_ids'],
+                    down_block_additional_residuals= down_block_res_samples,
+                    mid_block_additional_residual = mid_block_res_sample,
+                    return_dict=False,
+                )[0]
+                
 
-                target = noise_for_video
+                target = noise_total[:,:,:4,:]
 
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
@@ -630,6 +639,22 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     accelerator.clip_grad_norm_(params_to_clip, max_grad_norm)
 
                 # Use accelerator to step the optimizer and update the scaler
+                    
+                
+                # print the change of the params
+                cumulative_grad_sum = 0.0
+
+                for param in controlnet.parameters():
+                    if param.grad is not None:
+                        # Sum the squares of gradients
+                        cumulative_grad_sum += param.grad.data.norm(2).item() ** 2
+
+                # Take the square root to go back to the original scale
+                cumulative_grad_sum = cumulative_grad_sum ** 0.5
+
+                print(f"Cumulative Gradient Step (Norm): {cumulative_grad_sum}")
+
+
                 optimizer.step()
 
                 # Zero the parameter gradients

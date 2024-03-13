@@ -861,7 +861,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         unet: UNetSpatioTemporalConditionModel,
         scheduler: EulerDiscreteScheduler,
         feature_extractor: CLIPImageProcessor,
-        controlnet: UNetSpatioTemporalConditionModel # Het is niet echt van dit format 
+        controlnet: SpatioTemporalControlNet # Het is niet echt van dit format 
     ):
         super().__init__()
 
@@ -1684,7 +1684,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 # movce back
                 sample_downsampled = sample_downsampled.reshape(2,25,8,36,64)
 
-                down_block_res_samples, mid_block_res_sample = self.controlnet.forward(
+                down_block_res_samplesss, mid_block_res_samplesss = self.controlnet.forward(
                     sample_downsampled,
                     t,
                     encoder_hidden_states= prompt_embeds if prompt is not None else image_embeddings, 
@@ -1699,8 +1699,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     t,
                     encoder_hidden_states=image_embeddings,
                     added_time_ids=added_time_ids,
-                    down_block_additional_residuals= down_block_res_samples,
-                    mid_block_additional_residual = mid_block_res_sample,
+                    down_block_additional_residuals= down_block_res_samplesss,
+                    mid_block_additional_residual = mid_block_res_samplesss,
                     return_dict=False,
                 )[0]
 

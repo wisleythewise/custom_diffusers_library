@@ -1678,8 +1678,14 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 # Concatenate image_latents over channels dimention
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
+                sample_control = latent_model_input.reshape(50,8,72,128)
+                sample_downsampled = torch.nn.functional.interpolate(sample_control, scale_factor=0.5, mode='nearest')
+
+                # movce back
+                sample_downsampled = sample_downsampled.reshape(2,25,8,36,64)
+
                 down_block_res_samples, mid_block_res_sample = self.controlnet.forward(
-                    latent_model_input,
+                    sample_downsampled,
                     t,
                     encoder_hidden_states= prompt_embeds if prompt is not None else image_embeddings, 
                     added_time_ids=added_time_ids,

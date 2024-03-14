@@ -170,6 +170,7 @@ def _encode_vae_image(
             image = image.to(device=vae.device, dtype=vae.dtype)
             image_latents = vae.encode(image.to(device=vae.device)).latent_dist.mode()
 
+            image_latents = torch.nn.functional.interpolate(image_latents, size=(36,64), mode="nearest")
 
 
             # duplicate image_latents for each generation per prompt, using mps friendly method
@@ -251,7 +252,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
     # Importing the pipelines
     pipe = StableVideoDiffusionPipeline.from_pretrained(
-        "stabilityai/stable-video-diffusion-img2vid-xt", torch_dtype=torch.float16, variant="fp16"
+        "stabilityai/stable-video-diffusion-img2vid", torch_dtype=torch.float16, variant="fp16"
     )
     pipeline = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-2")
 
@@ -549,10 +550,10 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 timestep = timesteps[random_idx]
                 
                 # Get all the inputs
-                inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'])
-                
+                inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'][:14], num_frames=14)
+                # inputs = {k: v.to(device=accelerator.device, dtype=weight_dtype) for k, v in inputs.items()} 
                 # Convert images to latent space
-                latents = encode_batch(batch["ground_truth"], vae)
+                latents = encode_batch(batch["ground_truth"][:14], vae)
 
                 # make sure the latents are on the correct device and dtype
                 latents = latents.to(device=accelerator.device, dtype=weight_dtype)
@@ -580,14 +581,14 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
                 noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
                 noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
-                sample_control = noisy_latents.reshape(50,8,72,128)
-                sample_downsampled = torch.nn.functional.interpolate(sample_control, scale_factor=0.5, mode='nearest')
+                # sample_control = noisy_latents.reshape(50,8,72,128)
+                # sample_downsampled = torch.nn.functional.interpolate(sample_control, scale_factor=0.5, mode='nearest')
 
                 # movce back
-                sample_downsampled = sample_downsampled.reshape(2,25,8,36,64)
+                # sample_downsampled = sample_downsampled.reshape(2,25,8,36,64)
 
                 down_block_res_samples, mid_block_res_sample = controlnet.forward(
-                    sample_downsampled.to(device = accelerator.device, dtype = weight_dtype),
+                    noisy_latents.to(device = accelerator.device, dtype = weight_dtype),
                     timestep,
                     encoder_hidden_states= inputs["controlnet_encoder_hidden_states"], 
                     added_time_ids= inputs['controlnet_added_time_ids'],

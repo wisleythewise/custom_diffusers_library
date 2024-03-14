@@ -377,7 +377,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     #     )
 
     # Use 8-bit Adam for lower memory usage or to fine-tune the model in 16GB GPUs
-    if False:
+    if True:
         try:
             import bitsandbytes as bnb
         except ImportError:
@@ -599,7 +599,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
 
                 
-                model_pred = unet(
+                model_pred = unet.forward(
                     noisy_latents,
                     timestep,
                     encoder_hidden_states= inputs["unet_encoder_hidden_states"],

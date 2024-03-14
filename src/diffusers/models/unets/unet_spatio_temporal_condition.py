@@ -361,7 +361,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         for module in self.children():
             fn_recursive_feed_forward(module, chunk_size, dim)
-
+    # I want this function to be called with torch.no_grad() 
     def forward(
         self,
         sample: torch.FloatTensor,
@@ -443,8 +443,8 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)
 
         # print the shapes of the encoder hidden states and sample with the text we are in the spatiotemporalunet
-        # print(f"AAAAAAAAAAAAAAAAAA Encoder hidden states shape: {encoder_hidden_states.shape}")
-        # print(f"AAAAAAAAAAAAAAAAAA Sample shape: {sample.shape}")
+        print(f"AAAAAAAAAAAAAAAAAA Encoder hidden states shape: {encoder_hidden_states.shape}")
+        print(f"AAAAAAAAAAAAAAAAAA Sample shape: {sample.shape}")
 
 
         down_block_res_samples = (sample,)

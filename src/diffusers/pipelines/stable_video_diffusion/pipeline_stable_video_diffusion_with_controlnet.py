@@ -892,6 +892,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         self.controlnet = controlnet
         self.tokenizer = tokenizer
         self.text_encoder = text_encoder
+        self.do_classifier_free_guidance = True
 
 
     def encode_prompt(
@@ -1685,9 +1686,9 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 # Print the arguments shape and value of t
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                print(f"Shape of latent_model_input: {latent_model_input.shape}")
-                print(f"Value of t: {t}")
-                print(f"shpae image_latents: {image_latents.shape} ")
+                # print(f"Shape of latent_model_input: {latent_model_input.shape}")
+                # print(f"Value of t: {t}")
+                # print(f"shpae image_latents: {image_latents.shape} ")
                 # Concatenate image_latents over channels dimention
                 if latent_model_input.shape != image_latents.shape:
                     image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")

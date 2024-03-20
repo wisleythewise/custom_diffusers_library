@@ -622,7 +622,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
                 latent_model_input = latent_model_input * vae.config.scaling_factor 
                 
-                # latent_model_input = torch.cat([latents] * 2) 
+                latent_model_input = torch.cat([latents] * 2) 
 
                 
                 # Concatenate image_latents over channels dimention
@@ -630,7 +630,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 if latent_model_input.shape != image_latents.shape:
                     image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")
                
-                latent_model_input = torch.cat([latent_model_input, inputs['image_latents'][:1,:,:,:]], dim=2)
+                latent_model_input = torch.cat([latent_model_input, inputs['image_latents']], dim=2)
 
 
                 noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
@@ -674,7 +674,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     )[0]
                     
 
-                target = noise_total
+                target = noise_total[:,:,:4,:,:]
 
                 # noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                 # noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)

@@ -1077,7 +1077,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # print(f"this is the shape of the image: {image.shape}")
         image = image.to(device=device)
         image_latents = self.vae.encode(image).latent_dist.mode()
-
+        print(f"this is the shape of the image latents die je nu wilt hebbetn: {image_latents.shape}")
         if do_classifier_free_guidance:
             negative_image_latents = torch.zeros_like(image_latents)
 
@@ -1687,7 +1687,6 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
                 # Print the arguments shape and value of t
-
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
 
@@ -1695,12 +1694,6 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")
                     # print(f"shpae image_latents: {image_latents.shape} ")
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
-
-                # sample_control = latent_model_input.reshape(28,8,72,128)
-                # sample_downsampled = torch.nn.functional.interpolate(sample_control, scale_factor=0.5, mode='nearest')
-
-                # movce back
-                # sample_downsampled = sample_downsampled.reshape(2,14,8,36,64)
 
                 down_block_res_samplesss, mid_block_res_samplesss = self.controlnet.forward(
                     latent_model_input,
@@ -1726,10 +1719,12 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     return_dict=False,
                 )[0]
 
+
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                
 
 
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample

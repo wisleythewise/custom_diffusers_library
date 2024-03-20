@@ -61,6 +61,14 @@ if is_wandb_available():
 
 logger = get_logger(__name__)
 
+
+def _append_dims(x, target_dims):
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
+    dims_to_append = target_dims - x.ndim
+    if dims_to_append < 0:
+        raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
+    return x[(...,) + (None,) * dims_to_append]
+
 def validation_video(batch, pipe, control_net_trained, unet, tokenizer, text_encoder, step):
     with torch.no_grad():
         pipe_with_controlnet = StableVideoDiffusionPipelineWithControlNet(
@@ -299,8 +307,8 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         unet_weights = pipe.unet.state_dict()
         my_net.load_state_dict(unet_weights)
 
-        # checkpoint = torch.load('/mnt/e/13_Jasper_diffused_samples/training/unet/test/model_checkpoint_879.ckpt') 
-        # my_net.load_state_dict(checkpoint['unet_state_dict']) 
+        checkpoint = torch.load('/mnt/e/13_Jasper_diffused_samples/training/unet_uncoditional/test/model_checkpoint_239.ckpt') 
+        my_net.load_state_dict(checkpoint['unet_state_dict']) 
         
         
         control_net = SpatioTemporalControlNet.from_unet(my_net)
@@ -525,7 +533,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV3",
+                "tracker_project_name": "trainingTheUnetV5",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -583,10 +591,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     scheduler.set_timesteps(25, device=accelerator.device)
     timesteps = scheduler.timesteps
 
-
-
-
-
+    guidance_scale = None
     image_logs = None
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
@@ -599,19 +604,25 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # map the batch condition to decive and dtype
                 batch['conditioning'] = batch['conditioning'].to(device=accelerator.device, dtype=weight_dtype)
                 
+                
                 # Get all the inputs
                 inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'], num_frames=14)
 
                 latents = encode_batch(batch["ground_truth"] if not train_unet else batch["prescan_images"], vae)
+                
+                # if guidance_scale is None:
+                #     guidance_scale = torch.linspace(1, 3, 14).unsqueeze(0)
+                #     guidance_scale = guidance_scale.to(accelerator.device, weight_dtype )
+                #     guidance_scale = guidance_scale.repeat(1, 1)
+                #     guidance_scale = _append_dims(guidance_scale,  latents.ndim)
 
-                # scale the latenss
-
-                latents = latents * ( 2 ** (len(vae.config.block_out_channels) - 1) * 2)
-                latents = scheduler.scale_model_input(latents, timestep)
+                # scale the latens
+                # latents = scheduler.scale_model_input(latents, timestep)
                 
                 latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
+                latent_model_input = latent_model_input * vae.config.scaling_factor 
                 
-                latent_model_input = torch.cat([latents] * 2) 
+                # latent_model_input = torch.cat([latents] * 2) 
 
                 
                 # Concatenate image_latents over channels dimention
@@ -619,7 +630,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 if latent_model_input.shape != image_latents.shape:
                     image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")
                
-                latent_model_input = torch.cat([latent_model_input, inputs['image_latents']], dim=2)
+                latent_model_input = torch.cat([latent_model_input, inputs['image_latents'][:1,:,:,:]], dim=2)
 
 
                 noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
@@ -628,7 +639,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
                 if train_unet:
                                     
-                    model_pred = unet.forward(
+                    noise_pred = unet.forward(
                         noisy_latents,
                         timestep,
                         encoder_hidden_states= inputs["unet_encoder_hidden_states"],
@@ -652,7 +663,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
 
                 
-                    model_pred = unet.forward(
+                    noise_pred = unet.forward(
                         noisy_latents,
                         timestep,
                         encoder_hidden_states= inputs["unet_encoder_hidden_states"],
@@ -663,9 +674,13 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     )[0]
                     
 
-                target = noise_total[:,:,:4,:]
+                target = noise_total
 
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                # noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+                # noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+            
+
+                loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
                 print(f"this is the loss: {loss}")
 
                 accelerator.backward(loss)

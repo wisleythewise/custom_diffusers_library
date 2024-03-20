@@ -887,7 +887,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
             controlnet=controlnet,
             feature_extractor=feature_extractor,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) * 2
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)  
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.controlnet = controlnet
         self.tokenizer = tokenizer
@@ -1221,8 +1221,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
         prompt: str = None,
         conditioning_image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor]] = None,
-        height: int = 576,
-        width: int = 1024,
+        height: int = 288,
+        width: int = 512,
         num_frames: Optional[int] = None,
         num_inference_steps: int = 25,
         min_guidance_scale: float = 1.0,
@@ -1316,8 +1316,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
+        height = height or self.unet.config.sample_size[0] * self.vae_scale_factor
+        width = width or self.unet.config.sample_size[1] * self.vae_scale_factor
 
         num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
@@ -1458,8 +1458,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
         prompt: str = None,
         conditioning_image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor]] = None,
-        height: int = 576,
-        width: int = 1024,
+        height: int = 288,
+        width: int = 512,
         num_frames: Optional[int] = None,
         num_inference_steps: int = 25,
         min_guidance_scale: float = 1.0,
@@ -1553,8 +1553,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
+        height = height or self.unet.config.sample_size[0] * self.vae_scale_factor
+        width = width or self.unet.config.sample_size[1] * self.vae_scale_factor
 
         num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames

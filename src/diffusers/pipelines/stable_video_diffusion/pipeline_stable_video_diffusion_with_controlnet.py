@@ -1688,7 +1688,6 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
                 # Print the arguments shape and value of t
 
-                latent_model_input = latent_model_input * ( 2 ** (len(self.vae.config.block_out_channels) - 1) * 2)
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
 
@@ -1732,11 +1731,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
-                # print the shapes of the noise_pred and the latents
-                # print(f"Shape of noise_pred: {noise_pred.shape}")
-                # print(f"Shape of latents: {latents.shape}")
-                # print("asdjflkasjdflasjklf;lka")
-                # compute the previous noisy sample x_t -> x_t-1
+
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
 
                 if callback_on_step_end is not None:

@@ -98,7 +98,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
     ):
         super().__init__()
 
-        self.sample_size = sample_size
+        self.sample_size = (288,512)
         self.controlnet_enabled = controlnet_enabled
 
         # Check inputs

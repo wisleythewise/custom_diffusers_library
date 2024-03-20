@@ -892,7 +892,6 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         self.controlnet = controlnet
         self.tokenizer = tokenizer
         self.text_encoder = text_encoder
-        self.do_classifier_free_guidance = True
 
 
     def encode_prompt(
@@ -1124,7 +1123,9 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # [batch, frames, channels, height, width] -> [batch*frames, channels, height, width]
         latents = latents.flatten(0, 1)
 
+        # ISSUE this scaling factor is not the same as the one used in the forward pass
         latents = 1 / self.vae.config.scaling_factor * latents
+        # latents = 1 / self.vae_scale_factor * latents
 
         forward_vae_fn = self.vae._orig_mod.forward if is_compiled_module(self.vae) else self.vae.forward
         accepts_num_frames = "num_frames" in set(inspect.signature(forward_vae_fn).parameters.keys())
@@ -1680,16 +1681,17 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
 
+                print(f"are we doing the classifier free guidance: {self.do_classifier_free_guidance}")
+
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
                 # Print the arguments shape and value of t
+
+                latent_model_input = latent_model_input * ( 2 ** (len(self.vae.config.block_out_channels) - 1) * 2)
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # print(f"Shape of latent_model_input: {latent_model_input.shape}")
-                # print(f"Value of t: {t}")
-                # print(f"shpae image_latents: {image_latents.shape} ")
-                # Concatenate image_latents over channels dimention
+
                 if latent_model_input.shape != image_latents.shape:
                     image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")
                     # print(f"shpae image_latents: {image_latents.shape} ")

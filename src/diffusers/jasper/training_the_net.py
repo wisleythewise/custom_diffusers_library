@@ -473,7 +473,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # Set the desired attribute or action here. For example, to make the parameter trainable:
                 param.requires_grad = True
             else:
-                param.requires_grad = False
+                param.requires_grad = True
 
 
         # Prepare everything with our `accelerator`.
@@ -605,14 +605,20 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 latents = encode_batch(batch["ground_truth"] if not train_unet else batch["prescan_images"], vae)
 
                 # scale the latenss
+
                 latents = latents * ( 2 ** (len(vae.config.block_out_channels) - 1) * 2)
+                latents = scheduler.scale_model_input(latents, timestep)
                 
-                latents = latents.to(device=accelerator.device, dtype=weight_dtype)
+                latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
                 
                 latent_model_input = torch.cat([latents] * 2) 
 
                 
                 # Concatenate image_latents over channels dimention
+                image_latents = inputs['image_latents']
+                if latent_model_input.shape != image_latents.shape:
+                    image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")
+               
                 latent_model_input = torch.cat([latent_model_input, inputs['image_latents']], dim=2)
 
 
@@ -789,7 +795,7 @@ if __name__ == "__main__":
 
 
     main(
-        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet",
+        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_uncoditional",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
         gradient_accumulation_steps=4,
         mixed_precision="fp16",

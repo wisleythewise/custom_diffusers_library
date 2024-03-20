@@ -247,7 +247,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         
 
 
-
+        block_out_channels = (160, 320, 640, 640)
         self.sample_size = sample_size
         self.conditioning_net_config = conditioning_net_config
 
@@ -260,7 +260,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         )
 
 
-        channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280]
+        channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280] / 2
 
         # Initialize controlnet_down_blocks using nn.ModuleList
         self.controlnet_down_blocks = nn.ModuleList([
@@ -1316,10 +1316,10 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size[0] * self.vae_scale_factor
-        width = width or self.unet.config.sample_size[1] * self.vae_scale_factor
+        height = 512 or self.unet.config.sample_size[0] * self.vae_scale_factor
+        width = 288 or self.unet.config.sample_size[1] * self.vae_scale_factor
 
-        num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
+        num_frames = 14
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
 
         # 1. Check inputs. Raise error if not correct
@@ -1553,10 +1553,10 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size[0] * self.vae_scale_factor
-        width = width or self.unet.config.sample_size[1] * self.vae_scale_factor
+        height =  512 or self.unet.config.sample_size[0] * self.vae_scale_factor
+        width =  288 or self.unet.config.sample_size[1] * self.vae_scale_factor
 
-        num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
+        num_frames = 14
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
 
         # 1. Check inputs. Raise error if not correct

@@ -199,52 +199,6 @@ def collate_fn(batch):
         "prescan_images": prescan_images.flatten(0, 1)
     }
 
-def _encode_vae_image(
-
-        image: torch.Tensor,
-        vae
-    ):
-
-        with torch.no_grad(): 
-
-            # print(f"this is the shape of the image: {image.shape}")
-            image = image.to(device=vae.device, dtype=vae.dtype)
-            image_latents = vae.encode(image.to(device=vae.device)).latent_dist.sample()
-
-            image_latents = torch.nn.functional.interpolate(image_latents, size=(36,64), mode="nearest")
-
-
-            # duplicate image_latents for each generation per prompt, using mps friendly method
-            image_latents = image_latents.repeat(1, 1, 1, 1)
-
-            return image_latents
-
-def encode_batch(images, vae ):
-    outputs = []  # Initialize an empty list to store each output
-
-
-    # Loop through each image in the pseudo_image tensor
-    for i in range(images.shape[0]):
-        output = _encode_vae_image(
-            images[i].unsqueeze(0),  # Unsqueeze to add the batch dimension back
-            vae=vae
-        )
-        outputs.append(output)  # Append the output to the list
-
-    # Concatenate all outputs along the 0 dimension
-    final_output = torch.cat(outputs, dim=0)
-    final_output = final_output.unsqueeze(0)
-
-    # if True:
-    #     negative_image_latents = torch.zeros_like(final_output)
-
-    #     # For classifier free guidance, we need to do two forward passes.
-    #     # Here we concatenate the unconditional and text embeddings into a single batch
-    #     # to avoid doing two forward passes
-    #     final_output = torch.cat([negative_image_latents, final_output])
-
-    return final_output
-
 
 def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, hub_model_id):
     train_unet = True
@@ -281,7 +235,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
         # Pushing to the hub
         if True:
-            hub_token = "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"
+            hub_token = "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"
             repo_id = create_repo(
                 repo_id=hub_model_id or Path(output_dir).name, exist_ok=True, token=hub_token
             ).repo_id
@@ -481,7 +435,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # Set the desired attribute or action here. For example, to make the parameter trainable:
                 param.requires_grad = True
             else:
-                param.requires_grad = True
+                param.requires_grad = False
 
 
         # Prepare everything with our `accelerator`.
@@ -533,7 +487,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV6",
+                "tracker_project_name": "trainingTheUnetV7",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -613,7 +567,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
                 latent_model_input = latent_model_input * vae.config.scaling_factor 
                 latent_model_input = latent_model_input.unsqueeze(0)
-                latent_model_input = torch.cat([latent_model_input] * 2) 
+                # latent_model_input = torch.cat([latent_model_input] * 2) 
 
                 # if guidance_scale is None:
                 #     guidance_scale = torch.linspace(1.0, 3.0, 14).unsqueeze(0)
@@ -622,14 +576,19 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 #     guidance_scale = _append_dims(guidance_scale, 5)
 
                             
-                # Concatenate image_latents over channels dimention
-                image_latents = inputs['image_latents']
-
-                latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
-
 
                 noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
                 noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
+
+                # Concatenate image_latents over channels dimention get only the first dim
+                image_latents = inputs['image_latents'][:1]
+                latent_model_input = torch.cat([noisy_latents, image_latents], dim=2)
+
+
+                # Add some zeros for the unconditional generation
+                zeros = torch.zeros_like(latent_model_input)
+
+                noisy_latents = torch.cat([latent_model_input, zeros],dim=0)
                 noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
 
                 if train_unet:
@@ -669,13 +628,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     )[0]
                     
 
-                target = noise_total[:1,:,:4,:,:]
-
-                # noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
-                # noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-            
-
-                loss = F.mse_loss(noise_pred[:1].float(), target.float(), reduction="mean")
+                loss = F.mse_loss(noise_pred.float(), noise_total.float(), reduction="mean")
                 print(f"this is the loss: {loss}")
 
                 accelerator.backward(loss)

@@ -90,7 +90,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         layers_per_block: Union[int, Tuple[int]] = 2,
         cross_attention_dim: Union[int, Tuple[int]] = 1024,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
-        num_attention_heads: Union[int, Tuple[int]] = (5, 10, 10, 20),
+        num_attention_heads: Union[int, Tuple[int]] = (5, 10, 20, 20),
         num_frames: int = 25,
         down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         mid_block_additional_residual: Optional[torch.Tensor] = None,
@@ -545,16 +545,16 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             # print(f"Sample shape: {sample.shape}")
             # Convert res_samples to a list for modification
             
-            res_samples_list = list(res_samples)
+            # res_samples_list = list(res_samples)
 
 
-            for i, res_sample in enumerate(res_samples_list):
-                # Check if adjustment is needed
-                if sample.shape[2] != res_sample.shape[2] or sample.shape[3] != res_sample.shape[3]:
-                    # Adjust sample to match the spatial dimensions of res_sample
-                    target_height, target_width = res_sample.shape[2], res_sample.shape[3]
-                    sample = torch.nn.functional.interpolate(sample, size=(target_height, target_width), mode='bilinear', align_corners=False)
-            #         # print(f"this is the sample size of the sample after interpolation: {sample.shape}")
+            # for i, res_sample in enumerate(res_samples_list):
+            #     # Check if adjustment is needed
+            #     if sample.shape[2] != res_sample.shape[2] or sample.shape[3] != res_sample.shape[3]:
+            #         # Adjust sample to match the spatial dimensions of res_sample
+            #         target_height, target_width = res_sample.shape[2], res_sample.shape[3]
+            #         sample = torch.nn.functional.interpolate(sample, size=(target_height, target_width), mode='bilinear', align_corners=False)
+            # #         # print(f"this is the sample size of the sample after interpolation: {sample.shape}")
            ############################################################################################################################################
 
 

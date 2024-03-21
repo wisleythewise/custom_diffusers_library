@@ -45,12 +45,7 @@ from diffusers import DiffusionPipeline
 
 
 from diffusers.image_processor import VaeImageProcessor
-# We must login into wandb and huggingface
-# huggingface-cli login
-# huggingface-cli api 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
 
-# wandb login 
-# wandb api e22ca6359f013b2748d82d61417b843a3b9e74be
 
 # accelerate config
 # accelerate config default

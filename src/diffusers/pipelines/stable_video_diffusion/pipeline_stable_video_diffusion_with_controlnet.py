@@ -248,7 +248,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
 
         channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280] 
-        self.sample_size = (288,512) 
+        self.sample_size = (320,512) 
         self.conditioning_net_config = conditioning_net_config
 
         # input
@@ -281,7 +281,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
         # Inside SpatioTemporalControlNet __init__ method
         self.config.conditioning_net_config = {
-            "output_size": (36, 64),
+            "output_size": (40, 64),
             # Add other necessary configuration parameters here
         }
 
@@ -624,7 +624,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         
         # Print the shape of the sample
         # 2. pre-process
-        # print(f"Sample shape before the conversion: {sample.shape}")
+        print(f"Sample shape before the conversion: {sample.shape}")
             # Define the target dimensions
         # print(f"Sample shape after the conversion: {sample.shape}")
 
@@ -776,7 +776,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             transformer_layers_per_block=unet.config.transformer_layers_per_block,
             num_attention_heads=unet.config.num_attention_heads,
                conditioning_net_config={
-                "output_size": (36, 64),
+                "output_size": (40, 64),
                 # Include other necessary parameters for CustomConditioningNet initialization
             } 
         )
@@ -1200,7 +1200,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
         prompt: str = None,
         conditioning_image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor]] = None,
-        height: int = 288,
+        height: int = 320,
         width: int = 512,
         num_frames: Optional[int] = None,
         num_inference_steps: int = 25,
@@ -1295,7 +1295,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = 288 
+        height = 320 
         width = 512 
 
         num_frames = 14
@@ -1437,7 +1437,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
         prompt: str = None,
         conditioning_image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor]] = None,
-        height: int = 288,
+        height: int = 320,
         width: int = 512,
         num_frames: Optional[int] = None,
         num_inference_steps: int = 25,
@@ -1532,7 +1532,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = 288 
+        height = 320 
         width = 512
 
         num_frames = num_frames if num_frames is not None else self.unet.config.num_frames

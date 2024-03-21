@@ -247,8 +247,8 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         
 
 
-        block_out_channels = (160, 320, 640, 640)
-        self.sample_size = sample_size
+        channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280] 
+        self.sample_size = (288,512) 
         self.conditioning_net_config = conditioning_net_config
 
         # input
@@ -256,11 +256,8 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             in_channels,
             block_out_channels[0],
             kernel_size=3,
-            padding=1,
+            padding=1
         )
-
-
-        channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280] / 2
 
         # Initialize controlnet_down_blocks using nn.ModuleList
         self.controlnet_down_blocks = nn.ModuleList([
@@ -339,25 +336,6 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
                 resnet_act_fn="silu",
             )
             self.down_blocks.append(down_block)
-
-            # for _ in range(layers_per_block[i]):
-            #     controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
-            #     controlnet_block = zero_module(controlnet_block)
-            #     self.controlnet_down_blocks.append(controlnet_block)
-
-            # if not is_final_block:
-            #     controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
-            #     controlnet_block = zero_module(controlnet_block)
-            #     self.controlnet_down_blocks.append(controlnet_block)
-
-
-
-
-        # hardcoded_controlnet_block_dims = [320,320, 640,640, 1280, 1280, 1280,1280,1280]
-        # for index, controlnet_block_dim in enumerate(hardcoded_controlnet_block_dims):
-        #     controlnet_block = nn.Conv2d(controlnet_block_dim, controlnet_block_dim, kernel_size=1)
-        #     controlnet_block = zero_module(controlnet_block)
-        #     self.controlnet_down_blocks.append(controlnet_block)
 
 
         # Connections for the mid block
@@ -887,7 +865,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
             controlnet=controlnet,
             feature_extractor=feature_extractor,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)  
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) 
+        print(f"VAE scale factor: {self.vae_scale_factor}") 
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.controlnet = controlnet
         self.tokenizer = tokenizer
@@ -1077,7 +1056,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # print(f"this is the shape of the image: {image.shape}")
         image = image.to(device=device)
         image_latents = self.vae.encode(image).latent_dist.mode()
-        print(f"this is the shape of the image latents die je nu wilt hebbetn: {image_latents.shape}")
+        # print(f"this is the shape of the image latents die je nu wilt hebbetn: {image_latents.shape}")
         if do_classifier_free_guidance:
             negative_image_latents = torch.zeros_like(image_latents)
 
@@ -1316,8 +1295,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = 512 or self.unet.config.sample_size[0] * self.vae_scale_factor
-        width = 288 or self.unet.config.sample_size[1] * self.vae_scale_factor
+        height = 288 
+        width = 512 
 
         num_frames = 14
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
@@ -1553,10 +1532,10 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height =  512 or self.unet.config.sample_size[0] * self.vae_scale_factor
-        width =  288 or self.unet.config.sample_size[1] * self.vae_scale_factor
+        height = 288 
+        width = 512
 
-        num_frames = 14
+        num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
 
         # 1. Check inputs. Raise error if not correct
@@ -1681,7 +1660,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
 
-                print(f"are we doing the classifier free guidance: {self.do_classifier_free_guidance}")
+                # print(f"are we doing the classifier free guidance: {self.do_classifier_free_guidance}")
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
@@ -1690,9 +1669,6 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
 
-                if latent_model_input.shape != image_latents.shape:
-                    image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")
-                    # print(f"shpae image_latents: {image_latents.shape} ")
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
                 down_block_res_samplesss, mid_block_res_samplesss = self.controlnet.forward(
@@ -1704,12 +1680,10 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     controlnet_condition = conditioning_image
                 )
 
-                # print(down_block_res_samplesss)
-                print(mid_block_res_samplesss.mean())
+                
 
                 # predict the noise residual
                 noise_pred = self.unet(
-                    # latent_model_input,
                     latent_model_input,
                     t,
                     encoder_hidden_states=image_embeddings,

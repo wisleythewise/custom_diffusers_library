@@ -98,7 +98,8 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
     ):
         super().__init__()
 
-        block_out_channels = (160,320,640,640)
+        # block_out_channels = (160,320,640,640)
+        # projection_class_embeddings_input_dim = int(projection_class_embeddings_input_dim // 2)
         self.sample_size = (288,512)
         self.controlnet_enabled = controlnet_enabled
 
@@ -422,7 +423,9 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         emb = self.time_embedding(t_emb)
 
         time_embeds = self.add_time_proj(added_time_ids.flatten())
-        time_embeds = time_embeds.reshape((batch_size, -1))
+        time_embeds = time_embeds.reshape((2, -1))
+        if batch_size == 1:
+            time_embeds = torch.nn.functional.interpolate(time_embeds, size=(1, 786), mode='nearest')
         time_embeds = time_embeds.to(emb.dtype)
         aug_emb = self.add_embedding(time_embeds)
         emb = emb + aug_emb
@@ -442,11 +445,6 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         sample = self.conv_in(sample)
 
         image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)
-
-        # print the shapes of the encoder hidden states and sample with the text we are in the spatiotemporalunet
-        # print(f"AAAAAAAAAAAAAAAAAA Encoder hidden states shape: {encoder_hidden_states.shape}")
-        # print(f"AAAAAAAAAAAAAAAAAA Sample shape in the forward: {sample.shape}")
-
 
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
@@ -547,17 +545,17 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             # print(f"Sample shape: {sample.shape}")
             # Convert res_samples to a list for modification
             
-        #     res_samples_list = list(res_samples)
+            res_samples_list = list(res_samples)
 
 
-        #     for i, res_sample in enumerate(res_samples_list):
-        #         # Check if adjustment is needed
-        #         if sample.shape[2] != res_sample.shape[2] or sample.shape[3] != res_sample.shape[3]:
-        #             # Adjust sample to match the spatial dimensions of res_sample
-        #             target_height, target_width = res_sample.shape[2], res_sample.shape[3]
-        #             sample = torch.nn.functional.interpolate(sample, size=(target_height, target_width), mode='bilinear', align_corners=False)
-        #             # print(f"this is the sample size of the sample after interpolation: {sample.shape}")
-        #    ############################################################################################################################################
+            for i, res_sample in enumerate(res_samples_list):
+                # Check if adjustment is needed
+                if sample.shape[2] != res_sample.shape[2] or sample.shape[3] != res_sample.shape[3]:
+                    # Adjust sample to match the spatial dimensions of res_sample
+                    target_height, target_width = res_sample.shape[2], res_sample.shape[3]
+                    sample = torch.nn.functional.interpolate(sample, size=(target_height, target_width), mode='bilinear', align_corners=False)
+            #         # print(f"this is the sample size of the sample after interpolation: {sample.shape}")
+           ############################################################################################################################################
 
 
 

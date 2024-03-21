@@ -44,6 +44,7 @@ import gc
 from diffusers import DiffusionPipeline
 
 
+from diffusers.image_processor import VaeImageProcessor
 # We must login into wandb and huggingface
 # huggingface-cli login
 # huggingface-cli api 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
@@ -145,6 +146,7 @@ class DiffusionDataset(Dataset):
             transforms.Resize((288, 512)),
             transforms.CenterCrop((288, 512)),
         ])
+        self.image_processor = VaeImageProcessor(vae_scale_factor=8)
 
     def __len__(self):
         # Assuming each set of ground truths represents a separate sample
@@ -152,16 +154,20 @@ class DiffusionDataset(Dataset):
 
     def __getitem__(self, idx):
         # Processing ground truth images
-        to_tensor = transforms.ToTensor()
-        ground_truth_images = [to_tensor(self.transform(Image.open(path))) for path in self.data['ground_truth'][idx]]
+        
+        ground_truth_images = [self.transform(Image.open(path)) for path in self.data['ground_truth'][idx]]
+        ground_truth_images = self.image_processor.preprocess(image = ground_truth_images, height = 288, width = 512)
 
-        prescan_images = [to_tensor(self.transform(Image.open(path))) for path in self.data['prescan_images'][idx]]
+        prescan_images = [self.transform(Image.open(path)) for path in self.data['prescan_images'][idx]]
+        prescan_images = self.image_processor.preprocess(image = prescan_images, height = 288, width = 512)
 
         # Processing conditioning images set one (assuming RGB, 4 channels after conversion)
-        conditioning_images_one = [to_tensor(self.transform(Image.open(path))) for path in self.data['conditioning_images_one'][idx]]
+        conditioning_images_one = [self.transform(Image.open(path)) for path in self.data['conditioning_images_one'][idx]]
+        conditioning_images_one = self.image_processor.preprocess(image = conditioning_images_one, height = 288, width = 512)
 
         # Processing conditioning images set two (assuming grayscale, converted to RGB to match dimensions)
-        conditioning_images_two = [to_tensor(self.transform(Image.open(path))) for path in self.data['conditioning_images_two'][idx]]
+        conditioning_images_two = [self.transform(Image.open(path)) for path in self.data['conditioning_images_two'][idx]]
+        conditioning_images_two = self.image_processor.preprocess(image = conditioning_images_two, height = 288, width = 512)
         
         # Concatenating condition one and two images along the channel dimension
         conditioned_images = [torch.cat((img_one, img_two), dim=0) for img_one, img_two in zip(conditioning_images_one, conditioning_images_two)]
@@ -175,11 +181,11 @@ class DiffusionDataset(Dataset):
         
 
         return {
-            "ground_truth": torch.stack(ground_truth_images),
+            "ground_truth": ground_truth_images,
             "conditioning": torch.stack(conditioned_images),
             "caption": caption,
             "reference_image": reference_image,
-            "prescan_images": torch.stack(prescan_images)
+            "prescan_images": prescan_images
         }
 
 def collate_fn(batch):
@@ -192,11 +198,10 @@ def collate_fn(batch):
 
     return {
         "ground_truth": ground_truth.flatten(0, 1),
-        "prescan_images": prescan_images.flatten(0, 1),
         "conditioning": conditioning.flatten(0, 1),
         "caption": captions[0],
         "reference_image": reference_images[0],
-
+        "prescan_images": prescan_images.flatten(0, 1)
     }
 
 def _encode_vae_image(
@@ -307,8 +312,8 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         unet_weights = pipe.unet.state_dict()
         my_net.load_state_dict(unet_weights)
 
-        checkpoint = torch.load('/mnt/e/13_Jasper_diffused_samples/training/unet_uncoditional/test/model_checkpoint_239.ckpt') 
-        my_net.load_state_dict(checkpoint['unet_state_dict']) 
+        # checkpoint = torch.load('/mnt/e/13_Jasper_diffused_samples/training/unet_uncoditional/test/model_checkpoint_239.ckpt') 
+        # my_net.load_state_dict(checkpoint['unet_state_dict']) 
         
         
         control_net = SpatioTemporalControlNet.from_unet(my_net)
@@ -533,7 +538,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV5",
+                "tracker_project_name": "trainingTheUnetV6",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -607,30 +612,25 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 
                 # Get all the inputs
                 inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'], num_frames=14)
-
-                latents = encode_batch(batch["ground_truth"] if not train_unet else batch["prescan_images"], vae)
-                
-                # if guidance_scale is None:
-                #     guidance_scale = torch.linspace(1, 3, 14).unsqueeze(0)
-                #     guidance_scale = guidance_scale.to(accelerator.device, weight_dtype )
-                #     guidance_scale = guidance_scale.repeat(1, 1)
-                #     guidance_scale = _append_dims(guidance_scale,  latents.ndim)
-
-                # scale the latens
-                # latents = scheduler.scale_model_input(latents, timestep)
+                to_encode = batch["ground_truth"] if not train_unet else batch["prescan_images"]
+                latents = vae.encode(to_encode.to(dtype=weight_dtype, device=accelerator.device)).latent_dist.sample() 
                 
                 latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
                 latent_model_input = latent_model_input * vae.config.scaling_factor 
-                
-                latent_model_input = torch.cat([latents] * 2) 
+                latent_model_input = latent_model_input.unsqueeze(0)
+                latent_model_input = torch.cat([latent_model_input] * 2) 
 
-                
+                # if guidance_scale is None:
+                #     guidance_scale = torch.linspace(1.0, 3.0, 14).unsqueeze(0)
+                #     guidance_scale = guidance_scale.to(accelerator.device, weight_dtype)
+                #     guidance_scale = guidance_scale.repeat(1 * 1, 1)
+                #     guidance_scale = _append_dims(guidance_scale, 5)
+
+                            
                 # Concatenate image_latents over channels dimention
                 image_latents = inputs['image_latents']
-                if latent_model_input.shape != image_latents.shape:
-                    image_latents = torch.nn.functional.interpolate(image_latents, size=latent_model_input.shape[2:], mode="nearest")
-               
-                latent_model_input = torch.cat([latent_model_input, inputs['image_latents']], dim=2)
+
+                latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
 
                 noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
@@ -674,13 +674,13 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     )[0]
                     
 
-                target = noise_total[:,:,:4,:,:]
+                target = noise_total[:1,:,:4,:,:]
 
                 # noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                 # noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
             
 
-                loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
+                loss = F.mse_loss(noise_pred[:1].float(), target.float(), reduction="mean")
                 print(f"this is the loss: {loss}")
 
                 accelerator.backward(loss)
@@ -810,7 +810,7 @@ if __name__ == "__main__":
 
 
     main(
-        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_uncoditional",
+        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_batch",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
         gradient_accumulation_steps=4,
         mixed_precision="fp16",

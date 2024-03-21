@@ -624,7 +624,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         
         # Print the shape of the sample
         # 2. pre-process
-        print(f"Sample shape before the conversion: {sample.shape}")
+        # print(f"Sample shape before the conversion: {sample.shape}")
             # Define the target dimensions
         # print(f"Sample shape after the conversion: {sample.shape}")
 
@@ -1631,7 +1631,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
 
-        print(f"these are the height and width of the latent: {height} and {width}  ")
+        # print(f"these are the height and width of the latent: {height} and {width}  ")
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             num_frames,

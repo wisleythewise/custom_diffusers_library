@@ -94,11 +94,13 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         num_frames: int = 25,
         down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         mid_block_additional_residual: Optional[torch.Tensor] = None,
-        controlnet_enabled: bool = True
+        controlnet_enabled: bool = True 
     ):
         super().__init__()
 
-        self.sample_size = sample_size
+        # block_out_channels = (160,320,640,640)
+        # projection_class_embeddings_input_dim = int(projection_class_embeddings_input_dim // 2)
+        self.sample_size = (288,512)
         self.controlnet_enabled = controlnet_enabled
 
         # Check inputs
@@ -361,7 +363,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         for module in self.children():
             fn_recursive_feed_forward(module, chunk_size, dim)
-
+    # I want this function to be called with torch.no_grad() 
     def forward(
         self,
         sample: torch.FloatTensor,
@@ -421,7 +423,9 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         emb = self.time_embedding(t_emb)
 
         time_embeds = self.add_time_proj(added_time_ids.flatten())
-        time_embeds = time_embeds.reshape((batch_size, -1))
+        time_embeds = time_embeds.reshape((2, -1))
+        if batch_size == 1:
+            time_embeds = torch.nn.functional.interpolate(time_embeds, size=(1, 786), mode='nearest')
         time_embeds = time_embeds.to(emb.dtype)
         aug_emb = self.add_embedding(time_embeds)
         emb = emb + aug_emb
@@ -442,14 +446,10 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)
 
-        # print the shapes of the encoder hidden states and sample with the text we are in the spatiotemporalunet
-        # print(f"AAAAAAAAAAAAAAAAAA Encoder hidden states shape: {encoder_hidden_states.shape}")
-        # print(f"AAAAAAAAAAAAAAAAAA Sample shape: {sample.shape}")
-
-
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
+
                 sample, res_samples = downsample_block(
                     hidden_states=sample,
                     temb=emb,
@@ -492,7 +492,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
                 # If they are not the same throw an error with the shapes
                 if down_block_res_sample.shape != down_block_additional_residual.shape:
                     # uss the bilinear interpolate function to fix this
-                    down_block_additional_residual = torch.nn.functional.interpolate(down_block_additional_residual, size=down_block_res_sample.shape[2:], mode='bilinear', align_corners=False)
+                    down_block_additional_residual = torch.nn.functional.interpolate(down_block_additional_residual, size=down_block_res_sample.shape[2:], mode='nearest')
 
 
                 if down_block_res_sample.shape != down_block_additional_residual.shape:
@@ -519,7 +519,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
             if sample.shape != mid_block_additional_residual.shape:
                 # uss the bilinear interpolate function to fix this
-                mid_block_additional_residual = torch.nn.functional.interpolate(mid_block_additional_residual, size=sample.shape[2:], mode='bilinear', align_corners=False)
+                mid_block_additional_residual = torch.nn.functional.interpolate(mid_block_additional_residual, size=sample.shape[2:], mode='nearest')
 
             if sample.shape != mid_block_additional_residual.shape:
                 raise ValueError(
@@ -541,7 +541,24 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             # everything to the correct device
             encoder_hidden_states = encoder_hidden_states.to(dtype=emb.dtype, device=emb.device)
             
+            # ISSUE very sketchy code ############################################################
+            # print(f"Sample shape: {sample.shape}")
+            # Convert res_samples to a list for modification
             
+            res_samples_list = list(res_samples)
+
+
+            for i, res_sample in enumerate(res_samples_list):
+                # Check if adjustment is needed
+                if sample.shape[2] != res_sample.shape[2] or sample.shape[3] != res_sample.shape[3]:
+                    # Adjust sample to match the spatial dimensions of res_sample
+                    target_height, target_width = res_sample.shape[2], res_sample.shape[3]
+                    sample = torch.nn.functional.interpolate(sample, size=(target_height, target_width), mode='bilinear', align_corners=False)
+            #         # print(f"this is the sample size of the sample after interpolation: {sample.shape}")
+           ############################################################################################################################################
+
+
+
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
                 sample = upsample_block(
                     hidden_states=sample,
@@ -563,8 +580,10 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         sample = self.conv_act(sample)
         sample = self.conv_out(sample)
 
+
         # 7. Reshape back to original shape
         sample = sample.reshape(batch_size, num_frames, *sample.shape[1:])
+
 
         if not return_dict:
             return (sample,)

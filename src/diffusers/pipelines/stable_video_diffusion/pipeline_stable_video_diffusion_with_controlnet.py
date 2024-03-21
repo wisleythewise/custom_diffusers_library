@@ -247,8 +247,8 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         
 
 
-
-        self.sample_size = sample_size
+        channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280] 
+        self.sample_size = (288,512) 
         self.conditioning_net_config = conditioning_net_config
 
         # input
@@ -256,11 +256,8 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             in_channels,
             block_out_channels[0],
             kernel_size=3,
-            padding=1,
+            padding=1
         )
-
-
-        channel_sizes = [320, 320, 320, 320, 640, 640, 640, 1280, 1280, 1280, 1280, 1280]
 
         # Initialize controlnet_down_blocks using nn.ModuleList
         self.controlnet_down_blocks = nn.ModuleList([
@@ -339,25 +336,6 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
                 resnet_act_fn="silu",
             )
             self.down_blocks.append(down_block)
-
-            # for _ in range(layers_per_block[i]):
-            #     controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
-            #     controlnet_block = zero_module(controlnet_block)
-            #     self.controlnet_down_blocks.append(controlnet_block)
-
-            # if not is_final_block:
-            #     controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
-            #     controlnet_block = zero_module(controlnet_block)
-            #     self.controlnet_down_blocks.append(controlnet_block)
-
-
-
-
-        # hardcoded_controlnet_block_dims = [320,320, 640,640, 1280, 1280, 1280,1280,1280]
-        # for index, controlnet_block_dim in enumerate(hardcoded_controlnet_block_dims):
-        #     controlnet_block = nn.Conv2d(controlnet_block_dim, controlnet_block_dim, kernel_size=1)
-        #     controlnet_block = zero_module(controlnet_block)
-        #     self.controlnet_down_blocks.append(controlnet_block)
 
 
         # Connections for the mid block
@@ -584,7 +562,11 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
         
 
-
+        # print("Input sample:", sample.mean(), sample.std())
+        # sample_flat = sample.flatten(0, 1)
+        # print("After flattening:", sample_flat.mean(), sample_flat.std())
+        # sample_conv = self.conv_in(sample_flat)
+        # print("After initial conv:", sample_conv.mean(), sample_conv.std())
 
         # 1. time
         timesteps = timestep
@@ -865,7 +847,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         unet: UNetSpatioTemporalConditionModel,
         scheduler: EulerDiscreteScheduler,
         feature_extractor: CLIPImageProcessor,
-        controlnet: UNetSpatioTemporalConditionModel # Het is niet echt van dit format 
+        controlnet: SpatioTemporalControlNet # Het is niet echt van dit format 
     ):
         super().__init__()
 
@@ -887,7 +869,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
             controlnet=controlnet,
             feature_extractor=feature_extractor,
         )
-        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) 
+        print(f"VAE scale factor: {self.vae_scale_factor}") 
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.controlnet = controlnet
         self.tokenizer = tokenizer
@@ -1077,7 +1060,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # print(f"this is the shape of the image: {image.shape}")
         image = image.to(device=device)
         image_latents = self.vae.encode(image).latent_dist.mode()
-
+        # print(f"this is the shape of the image latents die je nu wilt hebbetn: {image_latents.shape}")
         if do_classifier_free_guidance:
             negative_image_latents = torch.zeros_like(image_latents)
 
@@ -1123,7 +1106,9 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # [batch, frames, channels, height, width] -> [batch*frames, channels, height, width]
         latents = latents.flatten(0, 1)
 
+        # ISSUE this scaling factor is not the same as the one used in the forward pass
         latents = 1 / self.vae.config.scaling_factor * latents
+        # latents = 1 / self.vae_scale_factor * latents
 
         forward_vae_fn = self.vae._orig_mod.forward if is_compiled_module(self.vae) else self.vae.forward
         accepts_num_frames = "num_frames" in set(inspect.signature(forward_vae_fn).parameters.keys())
@@ -1178,8 +1163,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
             batch_size,
             num_frames,
             num_channels_latents // 2,
-            height // self.vae_scale_factor,
-            width // self.vae_scale_factor,
+            height // (self.vae_scale_factor ),
+            width // (self.vae_scale_factor ),
         )
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
@@ -1219,8 +1204,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
         prompt: str = None,
         conditioning_image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor]] = None,
-        height: int = 576,
-        width: int = 1024,
+        height: int = 288,
+        width: int = 512,
         num_frames: Optional[int] = None,
         num_inference_steps: int = 25,
         min_guidance_scale: float = 1.0,
@@ -1314,10 +1299,10 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
+        height = 288 
+        width = 512 
 
-        num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
+        num_frames = 14
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
 
         # 1. Check inputs. Raise error if not correct
@@ -1432,6 +1417,9 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         self._guidance_scale = guidance_scale
 
 
+        image_latents = torch.nn.functional.interpolate(image_latents, size=latents.shape[2:], mode="nearest")
+
+
 
         # 8. Prepare the output
         latent_dict = {
@@ -1453,8 +1441,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
         prompt: str = None,
         conditioning_image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor]] = None,
-        height: int = 576,
-        width: int = 1024,
+        height: int = 288,
+        width: int = 512,
         num_frames: Optional[int] = None,
         num_inference_steps: int = 25,
         min_guidance_scale: float = 1.0,
@@ -1548,8 +1536,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         ```
         """
         # 0. Default height and width to unet
-        height = height or self.unet.config.sample_size * self.vae_scale_factor
-        width = width or self.unet.config.sample_size * self.vae_scale_factor
+        height = 288 
+        width = 512
 
         num_frames = num_frames if num_frames is not None else self.unet.config.num_frames
         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else num_frames
@@ -1622,6 +1610,9 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         # print(f"Shape of image latents before the unsqueeze: {image_latents.shape}")
         image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
 
+        # image_latents_zero = torch.zeros_like(image_latents)
+        # image_latents = image_latents_zero
+
         # Print the shape of the image latents after the unsqueeze
         # print(f"Shape of image latents after the unsqueeze: {image_latents.shape}")
 
@@ -1643,6 +1634,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
         # 5. Prepare latent variables
         num_channels_latents = self.unet.config.in_channels
+
+        print(f"these are the height and width of the latent: {height} and {width}  ")
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             num_frames,
@@ -1671,15 +1664,15 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
 
+                # print(f"are we doing the classifier free guidance: {self.do_classifier_free_guidance}")
+
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
                 # Print the arguments shape and value of t
-                print(f"Shape of latent_model_input: {latent_model_input.shape}")
-                print(f"Value of t: {t}")
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # Concatenate image_latents over channels dimention
+
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
 
                 # Here I need to do some downscaling
@@ -1690,7 +1683,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 sample_downsampled = sample_downsampled.reshape(2,25,8,36,64)
 
                 down_block_res_samples, mid_block_res_sample = self.controlnet.forward(
-                    sample_downsampled,
+                    latent_model_input,
                     t,
                     encoder_hidden_states= prompt_embeds if prompt is not None else image_embeddings, 
                     added_time_ids=added_time_ids,
@@ -1698,23 +1691,27 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     controlnet_condition = conditioning_image
                 )
 
+                
+
                 # predict the noise residual
                 noise_pred = self.unet(
                     latent_model_input,
                     t,
                     encoder_hidden_states=image_embeddings,
                     added_time_ids=added_time_ids,
-                    down_block_additional_residuals= down_block_res_samples,
-                    mid_block_additional_residual = mid_block_res_sample,
+                    down_block_additional_residuals= down_block_res_samplesss,
+                    mid_block_additional_residual = mid_block_res_samplesss,
                     return_dict=False,
                 )[0]
+
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                
 
-                # compute the previous noisy sample x_t -> x_t-1
+
                 latents = self.scheduler.step(noise_pred, t, latents).prev_sample
 
                 if callback_on_step_end is not None:

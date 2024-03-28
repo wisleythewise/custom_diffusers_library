@@ -32,8 +32,9 @@ from diffusers import (
     UNet2DConditionModel,
     UniPCMultistepScheduler,
 )
+import pdb
 from diffusers import StableVideoDiffusionPipeline
-
+from einops import rearrange
 from diffusers.models.unets import UNetSpatioTemporalConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_wandb_available, make_image_grid
@@ -58,6 +59,22 @@ if is_wandb_available():
 logger = get_logger(__name__)
 
 
+def rand_log_normal(shape, loc=0., scale=1., device='cpu', dtype=torch.float32):
+    """Draws samples from an lognormal distribution."""
+    u = torch.rand(shape, dtype=dtype, device=device) * (1 - 2e-7) + 1e-7
+    return torch.distributions.Normal(loc, scale).icdf(u).exp()
+
+def tensor_to_vae_latent(t, vae):
+    video_length = t.shape[1]
+
+    t = rearrange(t, "b f c h w -> (b f) c h w")
+    latents = vae.encode(t).latent_dist.sample()
+    latents = rearrange(latents, "(b f) c h w -> b f c h w", f=video_length)
+    latents = latents * vae.config.scaling_factor
+
+    return latents
+
+
 def _append_dims(x, target_dims):
     """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
     dims_to_append = target_dims - x.ndim
@@ -80,10 +97,13 @@ def validation_video(batch, pipe, control_net_trained, unet, tokenizer, text_enc
         
         prompt = "A driving scene during the night, with rainy weather in boston-seaport"
         # prompt = batch['caption']
-        pseudo_sample = batch['conditioning'][:14]
+        pseudo_sample = batch['conditioning'].flatten(0,1)
         # Define a simple torch generator
         generator = torch.Generator().manual_seed(42)
         image = batch['reference_image']
+
+        # Save the image
+        image.save(f"/mnt/e/13_Jasper_diffused_samples/training/output/images/image_{step}.png")
 
         frames = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = pseudo_sample,  decode_chunk_size=8, generator=generator).frames[0]
 
@@ -138,8 +158,8 @@ class DiffusionDataset(Dataset):
         with open(json_path, 'r') as f:
             self.data = json.load(f)
         self.transform = transforms.Compose([
-            transforms.Resize((288, 512)),
-            transforms.CenterCrop((288, 512)),
+            transforms.Resize((320, 512)),
+            transforms.CenterCrop((320, 512)),
         ])
         self.image_processor = VaeImageProcessor(vae_scale_factor=8)
 
@@ -151,24 +171,24 @@ class DiffusionDataset(Dataset):
         # Processing ground truth images
         
         ground_truth_images = [self.transform(Image.open(path)) for path in self.data['ground_truth'][idx]]
-        ground_truth_images = self.image_processor.preprocess(image = ground_truth_images, height = 288, width = 512)
+        ground_truth_images = self.image_processor.preprocess(image = ground_truth_images, height = 320, width = 512)
 
         prescan_images = [self.transform(Image.open(path)) for path in self.data['prescan_images'][idx]]
-        prescan_images = self.image_processor.preprocess(image = prescan_images, height = 288, width = 512)
+        prescan_images = self.image_processor.preprocess(image = prescan_images, height = 320, width = 512)
 
         # Processing conditioning images set one (assuming RGB, 4 channels after conversion)
         conditioning_images_one = [self.transform(Image.open(path)) for path in self.data['conditioning_images_one'][idx]]
-        conditioning_images_one = self.image_processor.preprocess(image = conditioning_images_one, height = 288, width = 512)
+        conditioning_images_one = self.image_processor.preprocess(image = conditioning_images_one, height = 320, width = 512)
 
         # Processing conditioning images set two (assuming grayscale, converted to RGB to match dimensions)
         conditioning_images_two = [self.transform(Image.open(path)) for path in self.data['conditioning_images_two'][idx]]
-        conditioning_images_two = self.image_processor.preprocess(image = conditioning_images_two, height = 288, width = 512)
+        conditioning_images_two = self.image_processor.preprocess(image = conditioning_images_two, height = 320, width = 512)
         
         # Concatenating condition one and two images along the channel dimension
         conditioned_images = [torch.cat((img_one, img_two), dim=0) for img_one, img_two in zip(conditioning_images_one, conditioning_images_two)]
 
         # Processing reference images (single per scene, matched by index)
-        reference_image = self.transform(Image.open(self.data['reference_image'][idx][0]))
+        reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
 
         # Retrieving the corresponding caption
         caption = self.data['caption'][idx][0]
@@ -192,16 +212,171 @@ def collate_fn(batch):
     
 
     return {
-        "ground_truth": ground_truth.flatten(0, 1),
-        "conditioning": conditioning.flatten(0, 1),
+        "ground_truth": ground_truth,
+        "conditioning": conditioning,
         "caption": captions[0],
         "reference_image": reference_images[0],
-        "prescan_images": prescan_images.flatten(0, 1)
+        "prescan_images": prescan_images
     }
+
+def encode_image(pixel_values, feature_extractor, image_encoder, accelerator, weight_dtype):
+    # pixel: [-1, 1]
+    pixel_values = _resize_with_antialiasing(pixel_values, (224, 224))
+    # We unnormalize it after resizing.
+    pixel_values = (pixel_values + 1.0) / 2.0
+
+    # Normalize the image with for CLIP input
+    pixel_values = feature_extractor(
+        images=pixel_values,
+        do_normalize=True,
+        do_center_crop=False,
+        do_resize=False,
+        do_rescale=False,
+        return_tensors="pt",
+    ).pixel_values
+
+    pixel_values = pixel_values.to(
+        device=accelerator.device, dtype=weight_dtype)
+    image_embeddings = image_encoder(pixel_values).image_embeds
+    return image_embeddings
+
+def _get_add_time_ids(
+    fps,
+    motion_bucket_id,
+    noise_aug_strength,
+    dtype,
+    batch_size,
+    unet
+):
+    add_time_ids = [fps, motion_bucket_id, noise_aug_strength]
+
+    # passed_add_embed_dim = unet.module.config.addition_time_embed_dim * \
+    #     len(add_time_ids)
+    # expected_add_embed_dim = unet.module.add_embedding.linear_1.in_features
+
+    # if expected_add_embed_dim != passed_add_embed_dim:
+    #     raise ValueError(
+    #         f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+    #     )
+
+    add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
+    add_time_ids = add_time_ids.repeat(batch_size, 1)
+    return add_time_ids
+
+def _resize_with_antialiasing(input, size, interpolation="bicubic", align_corners=True):
+    h, w = input.shape[-2:]
+    factors = (h / size[0], w / size[1])
+
+    # First, we have to determine sigma
+    # Taken from skimage: https://github.com/scikit-image/scikit-image/blob/v0.19.2/skimage/transform/_warps.py#L171
+    sigmas = (
+        max((factors[0] - 1.0) / 2.0, 0.001),
+        max((factors[1] - 1.0) / 2.0, 0.001),
+    )
+
+    # Now kernel size. Good results are for 3 sigma, but that is kind of slow. Pillow uses 1 sigma
+    # https://github.com/python-pillow/Pillow/blob/master/src/libImaging/Resample.c#L206
+    # But they do it in the 2 passes, which gives better results. Let's try 2 sigmas for now
+    ks = int(max(2.0 * 2 * sigmas[0], 3)), int(max(2.0 * 2 * sigmas[1], 3))
+
+    # Make sure it is odd
+    if (ks[0] % 2) == 0:
+        ks = ks[0] + 1, ks[1]
+
+    if (ks[1] % 2) == 0:
+        ks = ks[0], ks[1] + 1
+
+    input = _gaussian_blur2d(input, ks, sigmas)
+
+    output = torch.nn.functional.interpolate(
+        input, size=size, mode=interpolation, align_corners=align_corners)
+    return output
+
+
+def _compute_padding(kernel_size):
+    """Compute padding tuple."""
+    # 4 or 6 ints:  (padding_left, padding_right,padding_top,padding_bottom)
+    # https://pytorch.org/docs/stable/nn.html#torch.nn.functional.pad
+    if len(kernel_size) < 2:
+        raise AssertionError(kernel_size)
+    computed = [k - 1 for k in kernel_size]
+
+    # for even kernels we need to do asymmetric padding :(
+    out_padding = 2 * len(kernel_size) * [0]
+
+    for i in range(len(kernel_size)):
+        computed_tmp = computed[-(i + 1)]
+
+        pad_front = computed_tmp // 2
+        pad_rear = computed_tmp - pad_front
+
+        out_padding[2 * i + 0] = pad_front
+        out_padding[2 * i + 1] = pad_rear
+
+    return out_padding
+
+
+def _filter2d(input, kernel):
+    # prepare kernel
+    b, c, h, w = input.shape
+    tmp_kernel = kernel[:, None, ...].to(
+        device=input.device, dtype=input.dtype)
+
+    tmp_kernel = tmp_kernel.expand(-1, c, -1, -1)
+
+    height, width = tmp_kernel.shape[-2:]
+
+    padding_shape: list[int] = _compute_padding([height, width])
+    input = torch.nn.functional.pad(input, padding_shape, mode="reflect")
+
+    # kernel and input tensor reshape to align element-wise or batch-wise params
+    tmp_kernel = tmp_kernel.reshape(-1, 1, height, width)
+    input = input.view(-1, tmp_kernel.size(0), input.size(-2), input.size(-1))
+
+    # convolve the tensor with the kernel.
+    output = torch.nn.functional.conv2d(
+        input, tmp_kernel, groups=tmp_kernel.size(0), padding=0, stride=1)
+
+    out = output.view(b, c, h, w)
+    return out
+
+
+def _gaussian(window_size: int, sigma):
+    if isinstance(sigma, float):
+        sigma = torch.tensor([[sigma]])
+
+    batch_size = sigma.shape[0]
+
+    x = (torch.arange(window_size, device=sigma.device,
+         dtype=sigma.dtype) - window_size // 2).expand(batch_size, -1)
+
+    if window_size % 2 == 0:
+        x = x + 0.5
+
+    gauss = torch.exp(-x.pow(2.0) / (2 * sigma.pow(2.0)))
+
+    return gauss / gauss.sum(-1, keepdim=True)
+
+
+def _gaussian_blur2d(input, kernel_size, sigma):
+    if isinstance(sigma, tuple):
+        sigma = torch.tensor([sigma], dtype=input.dtype)
+    else:
+        sigma = sigma.to(dtype=input.dtype)
+
+    ky, kx = int(kernel_size[0]), int(kernel_size[1])
+    bs = sigma.shape[0]
+    kernel_x = _gaussian(kx, sigma[:, 1].view(bs, 1))
+    kernel_y = _gaussian(ky, sigma[:, 0].view(bs, 1))
+    out_x = _filter2d(input, kernel_x[..., None, :])
+    out = _filter2d(out_x, kernel_y[..., None])
+
+    return out
+
 
 
 def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, hub_model_id):
-    train_unet = True
+    train_unet = False 
 
     logging_dir = Path(output_dir, logging_dir)
 
@@ -268,10 +443,11 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         control_net = SpatioTemporalControlNet.from_unet(my_net)
         control_net = control_net.half()   
     else:
-        control_net = SpatioTemporalControlNet()
-        checkpoint = torch.load('/mnt/e/13_Jasper_diffused_samples/training/output/test/model_checkpoint_399.ckpt')
-        print(checkpoint['model_state_dict'].keys())     
-        control_net.load_state_dict(checkpoint['model_state_dict']) 
+        my_net =  UNetSpatioTemporalConditionModel()
+        unet_weights = pipe.unet.state_dict()
+        my_net.load_state_dict(unet_weights)
+
+        control_net = SpatioTemporalControlNet.from_unet(my_net)    
         control_net = control_net.half()   
         
     # Make them f16
@@ -302,10 +478,10 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     pipe_with_controlnet= pipe_with_controlnet.to(device= accelerator.device, dtype=torch.float16)
  
     # set some variables
-    max_train_steps = 192000
+    max_train_steps = 50000 
     learning_rate = 1e-5
     lr_scheduler = "constant"
-    lr_warmup_steps = 500
+    lr_warmup_steps = 0
     num_train_epochs = 50
     train_batch_size = 1
     adam_epsilon = 1e-08
@@ -431,7 +607,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
 
         for name, param in unet.named_parameters():
-            if "up_blocks" in name:
+            if "temporal_transformer_block" not in name:
                 # Set the desired attribute or action here. For example, to make the parameter trainable:
                 param.requires_grad = True
             else:
@@ -464,6 +640,21 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     controlnet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
 
+    if True:
+        if is_xformers_available():
+            import xformers
+
+            xformers_version = version.parse(xformers.__version__)
+            if xformers_version == version.parse("0.0.16"):
+                logger.warn(
+                    "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
+                )
+            unet.enable_xformers_memory_efficient_attention()
+        else:
+            raise ValueError(
+                "xformers is not available. Make sure it is installed correctly")
+
+
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
     if overrode_max_train_steps:
@@ -475,10 +666,10 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
         training_config = {
-                "max_train_steps": 192000,
+                "max_train_steps": 50000,
                 "learning_rate": 1e-5,
                 "lr_scheduler": "constant",
-                "lr_warmup_steps": 500,
+                "lr_warmup_steps": 0,
                 "num_train_epochs": 50,
                 "train_batch_size": 1,
                 "adam_epsilon": 1e-08,
@@ -487,7 +678,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV7",
+                "tracker_project_name": "trainingTheUnetV10global_",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -552,84 +743,146 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
             with accelerator.accumulate(unet if train_unet else controlnet):
                 
                 # Get the timestep
-                random_idx = torch.randint(0, 25, (1,))
-                timestep = timesteps[random_idx]
+                # random_idx = torch.randint(0, 25, (1,))
+                # timestep = timesteps[random_idx]
 
-                # map the batch condition to decive and dtype
-                batch['conditioning'] = batch['conditioning'].to(device=accelerator.device, dtype=weight_dtype)
+                # # map the batch condition to decive and dtype
+                # batch['conditioning'] = batch['conditioning'].to(device=accelerator.device, dtype=weight_dtype)
                 
                 
-                # Get all the inputs
+                # # Get all the inputs
                 inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'], num_frames=14)
-                to_encode = batch["ground_truth"] if not train_unet else batch["prescan_images"]
-                latents = vae.encode(to_encode.to(dtype=weight_dtype, device=accelerator.device)).latent_dist.sample() 
+                # to_encode = batch["ground_truth"] if not train_unet else batch["prescan_images"]
+                # latents = vae.encode(to_encode.to(dtype=weight_dtype, device=accelerator.device)).latent_dist.sample() 
                 
-                latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
-                latent_model_input = latent_model_input * vae.config.scaling_factor 
-                latent_model_input = latent_model_input.unsqueeze(0)
-                # latent_model_input = torch.cat([latent_model_input] * 2) 
-
-                # if guidance_scale is None:
-                #     guidance_scale = torch.linspace(1.0, 3.0, 14).unsqueeze(0)
-                #     guidance_scale = guidance_scale.to(accelerator.device, weight_dtype)
-                #     guidance_scale = guidance_scale.repeat(1 * 1, 1)
-                #     guidance_scale = _append_dims(guidance_scale, 5)
-
-                            
-
-                noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
-                noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
-
-                # Concatenate image_latents over channels dimention get only the first dim
-                image_latents = inputs['image_latents'][:1]
-                latent_model_input = torch.cat([noisy_latents, image_latents], dim=2)
+                # latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
+                # latent_model_input = latent_model_input * vae.config.scaling_factor 
+                # latent_model_input = latent_model_input.unsqueeze(0)
+                # # latent_model_input = torch.cat([latent_model_input] * 2) 
 
 
-                # Add some zeros for the unconditional generation
-                zeros = torch.zeros_like(latent_model_input)
 
-                noisy_latents = torch.cat([latent_model_input, zeros],dim=0)
-                noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
+                # noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
+                # noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
+
+                # # Concatenate image_latents over channels dimention get only the first dim
+                # image_latents = inputs['image_latents'][:1]
+                # latent_model_input = torch.cat([noisy_latents, image_latents], dim=2)
+
+
+                # # Add some zeros for the unconditional generation
+                # zeros = torch.zeros_like(latent_model_input)
+
+                # noisy_latents = torch.cat([latent_model_input, zeros],dim=0)
+                # noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
+
+                pixel_values = batch["ground_truth"].to(weight_dtype).to(
+                    accelerator.device, non_blocking=True
+                )
+                # pixel_values_conditional = batch["prescan_images"].to(weight_dtype).to(
+                #     accelerator.device, non_blocking=True
+                # )
+                conditional_pixel_values = pixel_values[:, 0:1, :, :, :]
+                
+                encoder_hidden_states = encode_image(
+                    pixel_values[:, 0, :, :, :].float(), feature_extractor=feature_extractor, image_encoder=image_encoder, accelerator=accelerator, weight_dtype=weight_dtype)
+
+                latents = tensor_to_vae_latent(pixel_values, vae)
+
+                # Sample noise that we'll add to the latents
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+
+                cond_sigmas = rand_log_normal(shape=[bsz,], loc=-3.0, scale=0.5).to(latents)
+                noise_aug_strength = cond_sigmas[0] # TODO: support batch > 1
+                cond_sigmas = cond_sigmas[:, None, None, None, None]
+                conditional_pixel_values = \
+                    torch.randn_like(conditional_pixel_values) * cond_sigmas + conditional_pixel_values
+                conditional_latents = tensor_to_vae_latent(conditional_pixel_values, vae)[:, 0, :, :, :]
+                conditional_latents = conditional_latents / vae.config.scaling_factor
+
+                # Sample a random timestep for each image
+                # P_mean=0.7 P_std=1.6
+                sigmas = rand_log_normal(shape=[bsz,], loc=0.7, scale=1.6).to(latents.device)
+                # Add noise to the latents according to the noise magnitude at each timestep
+                # (this is the forward diffusion process)
+                sigmas = sigmas[:, None, None, None, None]
+                noisy_latents = latents + noise * sigmas
+                timesteps = torch.Tensor(
+                    [0.25 * sigma.log() for sigma in sigmas]).to(accelerator.device)
+
+                inp_noisy_latents = noisy_latents / ((sigmas**2 + 1) ** 0.5)
+                timesteps = timesteps.to(device=accelerator.device, dtype=weight_dtype)
+
+                conditional_latents = conditional_latents.unsqueeze(
+                    1).repeat(1, noisy_latents.shape[1], 1, 1, 1)
+                inp_noisy_latents = torch.cat(
+                    [inp_noisy_latents, conditional_latents], dim=2)
+                inp_noisy_latents = inp_noisy_latents.to(device=accelerator.device, dtype=weight_dtype)
+
+                
+                added_time_ids = _get_add_time_ids(
+                    7, # fixed
+                    127, # motion_bucket_id = 127, fixed
+                    noise_aug_strength, # noise_aug_strength == cond_sigmas
+                    encoder_hidden_states.dtype,
+                    bsz,
+                    unet
+                )
+
+                # Make sure encoder hidden states and the added time ids are on the same device
+                encoder_hidden_states = encoder_hidden_states.to(device=accelerator.device, dtype=weight_dtype)
+                added_time_ids = added_time_ids.to(device=accelerator.device, dtype=weight_dtype)
 
                 if train_unet:
+                    model_pred = unet(
+                        inp_noisy_latents, timesteps,encoder_hidden_states=inputs["unet_encoder_hidden_states"][:1], added_time_ids = added_time_ids).sample
                                     
-                    noise_pred = unet.forward(
-                        noisy_latents,
-                        timestep,
-                        encoder_hidden_states= inputs["unet_encoder_hidden_states"],
-                        added_time_ids= inputs['unet_added_time_ids'],
-                        # down_block_additional_residuals= down_block_res_samples,
-                        # mid_block_additional_residual = mid_block_res_sample,
-                        return_dict=False,
-                    )[0]
                     
 
                 else:
                     down_block_res_samples, mid_block_res_sample = controlnet.forward(
-                        noisy_latents.to(device = accelerator.device, dtype = weight_dtype),
-                        timestep,
-                        encoder_hidden_states= inputs["controlnet_encoder_hidden_states"], 
-                        added_time_ids= inputs['controlnet_added_time_ids'],
+                        inp_noisy_latents,
+                        timesteps,
+                        encoder_hidden_states= inputs["controlnet_encoder_hidden_states"][:1], 
+                        added_time_ids= added_time_ids,
                         return_dict=False,
-                        controlnet_condition = inputs['controlnet_condition']
+                        controlnet_condition = inputs['controlnet_condition'].flatten(0,1),
+                        training = True
                     )
                 # predict the noise residual
 
 
                 
-                    noise_pred = unet.forward(
-                        noisy_latents,
-                        timestep,
-                        encoder_hidden_states= inputs["unet_encoder_hidden_states"],
-                        added_time_ids= inputs['unet_added_time_ids'],
+                    model_pred = unet(
+                        inp_noisy_latents,
+                        timesteps,
+                        encoder_hidden_states= inputs["unet_encoder_hidden_states"][:1],
+                        added_time_ids= added_time_ids,
                         down_block_additional_residuals= down_block_res_samples,
                         mid_block_additional_residual = mid_block_res_sample,
-                        return_dict=False,
-                    )[0]
-                    
+                    ).sample
 
-                loss = F.mse_loss(noise_pred.float(), noise_total.float(), reduction="mean")
-                print(f"this is the loss: {loss}")
+
+                
+                target = latents
+
+                # Denoise the latents
+                c_out = -sigmas / ((sigmas**2 + 1)**0.5)
+                c_skip = 1 / (sigmas**2 + 1)
+                denoised_latents = model_pred * c_out + c_skip * noisy_latents
+                weighing = (1 + sigmas ** 2) * (sigmas**-2.0)
+
+                # MSE loss
+                loss = torch.mean(
+                    (weighing.float() * (denoised_latents.float() -
+                     target.float()) ** 2).reshape(target.shape[0], -1),
+                    dim=1,
+                )
+                loss = loss.mean()
+
+                # loss = F.mse_loss(noise_pred.float(), noise_total.float(), reduction="mean")
+                # print(f"this is the loss: {loss}")
 
                 accelerator.backward(loss)
 
@@ -655,12 +908,12 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
 
                 optimizer.step()
+                lr_scheduler.step()
 
                 # Zero the parameter gradients
                 optimizer.zero_grad(set_to_none=True)
 
                 # Step the learning rate scheduler
-                lr_scheduler.step()
 
              
             # Checks if the accelerator has performed an optimization step behind the scenes
@@ -669,8 +922,12 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % 20 == 0:
+                    if global_step % 200 == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                        try:
+                            validation_video(batch, pipe_with_controlnet, controlnet, unet, tokenizer, text_encoder, global_step) 
+                        except Exception as e:
+                            print(e)
                         if True :
                             checkpoints = os.listdir(output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
@@ -679,10 +936,6 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                         save_path = os.path.join(output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
-                        try:
-                            validation_video(batch, pipe_with_controlnet, controlnet, unet, tokenizer, text_encoder, step) 
-                        except Exception as e:
-                            print(e)
                         # delete the oldest checkpoint if there are more than 4
                         try:
                             if len(checkpoints) > 4:
@@ -758,7 +1011,7 @@ if __name__ == "__main__":
 
 
     main(
-        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_batch",
+        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_controlnet_param",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
         gradient_accumulation_steps=4,
         mixed_precision="fp16",

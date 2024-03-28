@@ -239,7 +239,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         layers_per_block: Union[int, Tuple[int]] = 2,
         cross_attention_dim: Union[int, Tuple[int]] = 1024,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
-        num_attention_heads: Union[int, Tuple[int]] = (5, 10, 10, 20),
+        num_attention_heads: Union[int, Tuple[int]] = (5, 10, 20, 20),
         conditioning_net_config = None
 
     ):
@@ -536,6 +536,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         added_time_ids: torch.Tensor,
         return_dict: bool = True,
         controlnet_condition : torch.FloatTensor = None,
+        training: bool = False
     ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
         r"""
         The [`UNetSpatioTemporalConditionModel`] forward method.
@@ -656,6 +657,8 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             # To the device of the sample
             controlnet_condition = controlnet_condition.to(sample.device, dtype=sample.dtype)
             controlnet_condition =  self.conditioning_embedding.forward(controlnet_condition)
+            if training:
+                controlnet_condition = controlnet_condition[:1]
             controlnet_condition = controlnet_condition.flatten(0, 1)
             if controlnet_condition.shape != sample.shape:
                 raise ValueError(f"Jappie Controlnet condition shape {controlnet_condition.shape} does not match the sample shape {sample.shape}")

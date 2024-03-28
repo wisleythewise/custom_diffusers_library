@@ -255,6 +255,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
+
     def prepare_latents(
         self,
         batch_size,

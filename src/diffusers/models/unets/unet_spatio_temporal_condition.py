@@ -59,7 +59,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
             The number of transformer blocks of type [`~models.attention.BasicTransformerBlock`]. Only relevant for
             [`~models.unet_3d_blocks.CrossAttnDownBlockSpatioTemporal`], [`~models.unet_3d_blocks.CrossAttnUpBlockSpatioTemporal`],
             [`~models.unet_3d_blocks.UNetMidBlockSpatioTemporal`].
-        num_attention_heads (`int`, `Tuple[int]`, defaults to `(5, 10, 10, 20)`):
+        num_attention_heads (`int`, `Tuple[int]`, defaults to `(5, 10, 20, 20)`):
             The number of attention heads.
         dropout (`float`, *optional*, defaults to 0.0): The dropout probability to use.
     """
@@ -100,7 +100,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         # block_out_channels = (160,320,640,640)
         # projection_class_embeddings_input_dim = int(projection_class_embeddings_input_dim // 2)
-        self.sample_size = (288,512)
+        self.sample_size = (320,512)
         self.controlnet_enabled = controlnet_enabled
 
         # Check inputs
@@ -410,7 +410,6 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
 
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         batch_size, num_frames = sample.shape[:2]
-        # print("This is the batch size",batch_size)  
         timesteps = timesteps.expand(batch_size)
 
         t_emb = self.time_proj(timesteps)
@@ -423,9 +422,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         emb = self.time_embedding(t_emb)
 
         time_embeds = self.add_time_proj(added_time_ids.flatten())
-        time_embeds = time_embeds.reshape((2, -1))
-        if batch_size == 1:
-            time_embeds = torch.nn.functional.interpolate(time_embeds, size=(1, 786), mode='nearest')
+        time_embeds = time_embeds.reshape((batch_size, -1))
         time_embeds = time_embeds.to(emb.dtype)
         aug_emb = self.add_embedding(time_embeds)
         emb = emb + aug_emb

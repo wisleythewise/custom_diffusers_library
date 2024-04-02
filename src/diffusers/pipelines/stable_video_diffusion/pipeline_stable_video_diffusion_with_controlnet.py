@@ -92,39 +92,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class CustomConditioningNet(nn.Module):
-    def __init__(self,output_size=(72, 128)):
+    def __init__(self,output_size=(40, 64), num_channels=4):
         super().__init__()
-
+        self.num_channels = num_channels
         self.output_size = output_size
 
-        # Initial convolution to match the first target channel dimension
-        self.initial_conv = nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1)
-
-        # Defining a series of convolutional blocks to progressively downsample
-        # and increase channel dimensions towards the target size
-        self.conv_blocks = nn.ModuleList([
+        # Adjust the channel dimensions to keep them fixed at 4
+        # While also implementing downsampling to reach the target spatial dimensions.
+        # A series of Conv2d and SiLU layers are defined with kernel_size=3, stride=2, and padding=1
+        # This will progressively halve the spatial dimensions while retaining the number of channels.
+        self.downsampling_layers = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
                 nn.SiLU(),
-                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
                 nn.SiLU()
             ),
-            nn.Sequential(
-                nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-                nn.SiLU(),
-                nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-                nn.SiLU()
-            ),
-            nn.Sequential(
-                nn.Conv2d(256, 320, kernel_size=3, stride=2, padding=1),
-                nn.SiLU()
-            )
+            # Additional downsampling blocks as needed
         ])
 
-        # Final adjustment to target spatial dimensions
-        # Considering a final adaptive pooling layer to ensure matching to the target spatial size (64x64)
-        self.adaptive_pool = nn.AdaptiveAvgPool2d(self.output_size)
+        # The last spatial dimension will be reduced to slightly larger than the target size.
+        # The exact layers needed will depend on the initial size and the amount of downsampling required.
 
+        # Final adjustment to match the target spatial dimensions (40, 60).
+        # Using adaptive pooling to ensure the output matches the desired size.
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(self.output_size)
 
     def cast_model_to(self, device, dtype):
         """
@@ -155,19 +147,22 @@ class CustomConditioningNet(nn.Module):
             buffer.data = buffer.data.to(device=device, dtype=dtype)
         return
 
-    def forward(self, x):
+    def forward(self, x, do_classifier_free=False):
+        # print("this is the input shape", x.shape)
 
+        for layer in self.downsampling_layers:
+            x = layer(x)
 
-        x = self.initial_conv(x)
-        
-        for block in self.conv_blocks:
-            x = block(x)
-        
+        # Adjust the channel dimension if needed
+        # Your network architecture may not change the channel dimension
+        # If it does, you'll need to reshape or transform x accordingly
+
+        # Apply adaptive pooling to get the target spatial dimensions.
         x = self.adaptive_pool(x)
-        
         x = x.unsqueeze(0)
+
+        # print("this is the output shape", x.shape)
         
-        x = torch.cat([x,x]) 
         return x
 
     
@@ -282,7 +277,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         # Inside SpatioTemporalControlNet __init__ method
         self.config.conditioning_net_config = {
             "output_size": (40, 64),
-            # Add other necessary configuration parameters here
+            "num_channels" : 4
         }
 
         # Then, you initialize CustomConditioningNet inside SpatioTemporalControlNet using this config
@@ -602,38 +597,8 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         # sample: [batch, frames, channels, height, width] -> [batch * frames, channels, height, width]
 
         
-
-
-        sample = sample.flatten(0, 1)
-        sample = self.conv_in(sample)
-        # Repeat the embeddings num_video_frames times
-        # emb: [batch, channels] -> [batch * frames, channels]
-        emb = emb.repeat_interleave(num_frames, dim=0).to(sample.device)
-        # encoder_hidden_states: [batch, 1, channels] -> [batch * frames, 1, channels]
-        # Let encoder_hidden_states be just zeros in the correct format
-        # shape_encoder_hidden_states = (batch_size * num_frames, 1, 1024)
-
-        
-
-        if encoder_hidden_states is None:
-            shape_encoder_hidden_states = (batch_size * num_frames, 1, 1024)
-            encoder_hidden_states = torch.zeros(shape_encoder_hidden_states, device=sample.device).repeat_interleave(num_frames, dim=0).to(dtype=sample.dtype)
-            # print(f"Shape of encoder hidden states without: {encoder_hidden_states.shape}")
-        else: 
-            encoder_hidden_states = encoder_hidden_states.repeat_interleave(num_frames, dim=0)
-            # print(f"Shape of encoder hidden states with: {encoder_hidden_states.shape}")
-        
-        # Print the shape of the sample
-        # 2. pre-process
-        # print(f"Sample shape before the conversion: {sample.shape}")
-            # Define the target dimensions
-        # print(f"Sample shape after the conversion: {sample.shape}")
-
-
-        # Make sure the controlnet_condition model and the controlet have if same type
-        # And are running on the same device
-
-
+        # print("we are in the forward method of the controlnet model")
+        # print("this is the shape of the sample before the conv", sample.shape)
 
         if controlnet_condition is not None: 
 
@@ -657,15 +622,47 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             # To the device of the sample
             controlnet_condition = controlnet_condition.to(sample.device, dtype=sample.dtype)
             controlnet_condition =  self.conditioning_embedding.forward(controlnet_condition)
-            if training:
-                controlnet_condition = controlnet_condition[:1]
-            controlnet_condition = controlnet_condition.flatten(0, 1)
-            if controlnet_condition.shape != sample.shape:
+             
+            if not all(s1 == s2 for i, (s1, s2) in enumerate(zip(controlnet_condition.shape, sample.shape)) if i not in  [0,2]):
                 raise ValueError(f"Jappie Controlnet condition shape {controlnet_condition.shape} does not match the sample shape {sample.shape}")
         else:
             controlnet_condition = torch.zeros_like(sample).to(sample.device, dtype=sample.dtype)
         
-        sample += controlnet_condition
+        sample[1:,:,:4,:,:] += controlnet_condition
+
+
+        sample = sample.flatten(0, 1)
+        sample = self.conv_in(sample)
+        # Repeat the embeddings num_video_frames times
+        # emb: [batch, channels] -> [batch * frames, channels]
+        emb = emb.repeat_interleave(num_frames, dim=0).to(sample.device)
+        # encoder_hidden_states: [batch, 1, channels] -> [batch * frames, 1, channels]
+        # Let encoder_hidden_states be just zeros in the correct format
+        # shape_encoder_hidden_states = (batch_size * num_frames, 1, 1024)
+
+        
+        # print("this is the shape of the sample after the conv", sample.shape)
+
+        if encoder_hidden_states is None:
+            shape_encoder_hidden_states = (batch_size * num_frames, 1, 1024)
+            encoder_hidden_states = torch.zeros(shape_encoder_hidden_states, device=sample.device).repeat_interleave(num_frames, dim=0).to(dtype=sample.dtype)
+            # print(f"Shape of encoder hidden states without: {encoder_hidden_states.shape}")
+        else: 
+            encoder_hidden_states = encoder_hidden_states.repeat_interleave(num_frames, dim=0)
+            # print(f"Shape of encoder hidden states with: {encoder_hidden_states.shape}")
+        
+        # Print the shape of the sample
+        # 2. pre-process
+        # print(f"Sample shape before the conversion: {sample.shape}")
+            # Define the target dimensions
+        # print(f"Sample shape after the conversion: {sample.shape}")
+
+
+        # Make sure the controlnet_condition model and the controlet have if same type
+        # And are running on the same device
+
+
+
         
 
         image_only_indicator = torch.zeros(batch_size, num_frames, dtype=sample.dtype, device=sample.device)

@@ -1018,7 +1018,7 @@ if __name__ == "__main__":
     main(
         output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_controlnet_param",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=1,
         mixed_precision="fp16",
         hub_model_id="temporalControlNet",
     )

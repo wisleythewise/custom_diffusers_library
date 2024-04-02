@@ -59,6 +59,14 @@ if is_wandb_available():
 logger = get_logger(__name__)
 
 
+def print_sum_of_weights_for_zero_initialized_layers(model):
+    layers_of_interest = [model.controlnet_mid_block] + list(model.controlnet_down_blocks)
+    for i, layer in enumerate(layers_of_interest):
+        if isinstance(layer, nn.Conv2d):
+            weight_sum = layer.weight.sum().item()
+            print(f"Layer {i} weight sum: {weight_sum}")
+
+
 def rand_log_normal(shape, loc=0., scale=1., device='cpu', dtype=torch.float32):
     """Draws samples from an lognormal distribution."""
     u = torch.rand(shape, dtype=dtype, device=device) * (1 - 2e-7) + 1e-7
@@ -927,7 +935,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % 20 == 0:
+                    if global_step % 20 == 0 or global_step == 1:
                         try:
                             validation_video(batch, pipe_with_controlnet, controlnet, unet, tokenizer, text_encoder, global_step) 
                         except Exception as e:
@@ -1020,7 +1028,7 @@ if __name__ == "__main__":
     main(
         output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_maybe_final",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=4,
         mixed_precision="fp16",
         hub_model_id="temporalControlNet",
     )

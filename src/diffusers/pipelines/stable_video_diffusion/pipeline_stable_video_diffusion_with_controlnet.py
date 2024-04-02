@@ -106,7 +106,10 @@ class CustomConditioningNet(nn.Module):
                 nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
                 nn.SiLU(),
                 nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
                 nn.SiLU()
+                
             ),
             # Additional downsampling blocks as needed
         ])
@@ -117,6 +120,10 @@ class CustomConditioningNet(nn.Module):
         # Final adjustment to match the target spatial dimensions (40, 60).
         # Using adaptive pooling to ensure the output matches the desired size.
         self.adaptive_pool = nn.AdaptiveAvgPool2d(self.output_size)
+
+        self.conv_out = zero_module(
+            nn.Conv2d(4, 4, kernel_size=3, padding=1)
+        )
 
     def cast_model_to(self, device, dtype):
         """
@@ -153,12 +160,8 @@ class CustomConditioningNet(nn.Module):
         for layer in self.downsampling_layers:
             x = layer(x)
 
-        # Adjust the channel dimension if needed
-        # Your network architecture may not change the channel dimension
-        # If it does, you'll need to reshape or transform x accordingly
-
-        # Apply adaptive pooling to get the target spatial dimensions.
         x = self.adaptive_pool(x)
+        x = self.conv_out(x)
         x = x.unsqueeze(0)
 
         # print("this is the output shape", x.shape)
@@ -254,10 +257,6 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             padding=1
         )
 
-        # Initialize controlnet_down_blocks using nn.ModuleList
-        self.controlnet_down_blocks = nn.ModuleList([
-            zero_module(nn.Conv2d(channels, channels, kernel_size=1)) for channels in channel_sizes
-        ])
 
 
         # time
@@ -286,7 +285,12 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         
    
         self.down_blocks = nn.ModuleList([])
+        self.controlnet_down_blocks = nn.ModuleList([])
 
+        # Initialize controlnet_down_blocks using nn.ModuleList
+        # self.controlnet_down_blocks = nn.ModuleList([
+        #     zero_module(nn.Conv2d(channels, channels, kernel_size=1)) for channels in channel_sizes
+        # ])
 
         
         if isinstance(num_attention_heads, int):
@@ -306,9 +310,9 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         # Initialize the connection between the down blocks and the unet
         output_channel = block_out_channels[0]
 
-        # controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
-        # controlnet_block = zero_module(controlnet_block)
-        # self.controlnet_down_blocks.append(controlnet_block)
+        controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
+        controlnet_block = zero_module(controlnet_block)
+        self.controlnet_down_blocks.append(controlnet_block)
 
         # down
         output_channel = block_out_channels[0]
@@ -331,6 +335,17 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
                 resnet_act_fn="silu",
             )
             self.down_blocks.append(down_block)
+
+            for _ in range(layers_per_block[i]):
+                controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
+                controlnet_block = zero_module(controlnet_block)
+                self.controlnet_down_blocks.append(controlnet_block)
+
+            if not is_final_block:
+                controlnet_block = nn.Conv2d(output_channel, output_channel, kernel_size=1)
+                controlnet_block = zero_module(controlnet_block)
+                self.controlnet_down_blocks.append(controlnet_block)
+
 
 
         # Connections for the mid block
@@ -694,27 +709,6 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             image_only_indicator=image_only_indicator,
         )
 
-        
-        # 5. Control net blocks
-
-        # initialize the controlnet_down_block_res_samples of it is on embpy nn.ModuleList
-        # if self.controlnet_down_blocks is None:
-            # self.controlnet_down_blocks = nn.ModuleList([])
-
-
-            # for down_block_res_sample in down_block_res_samples:
-            #     # Determine the current number of channels in the tensor
-            #     current_channels = down_block_res_sample.size(1)
-
-            #     # print(f"Current channels: {current_channels}")
-                
-            #     # Dynamically create a zero convolution block for the current tensor
-            #     controlnet_block = nn.Conv2d(current_channels, current_channels, kernel_size=1)
-            #     controlnet_block = zero_module(controlnet_block).to(down_block_res_sample.device, dtype=sample.dtype)
-            
-                
-            #     # Store the processed sample for further use
-            #     self.controlnet_down_blocks.append(controlnet_block)
     
 
         controlnet_down_block_res_samples = ()
@@ -1679,6 +1673,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     return_dict=False,
                     controlnet_condition = conditioning_image
                 )
+
 
                 
 

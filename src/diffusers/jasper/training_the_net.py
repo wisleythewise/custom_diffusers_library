@@ -94,20 +94,25 @@ def validation_video(batch, pipe, control_net_trained, unet, tokenizer, text_enc
         tokenizer = tokenizer,
         text_encoder = text_encoder
         )
-        
+
+        # Normal
         prompt = "A driving scene during the night, with rainy weather in boston-seaport"
         # prompt = batch['caption']
         pseudo_sample = batch['conditioning'].flatten(0,1)
         # Define a simple torch generator
         generator = torch.Generator().manual_seed(42)
         image = batch['reference_image']
-
         # Save the image
         image.save(f"/mnt/e/13_Jasper_diffused_samples/training/output/images/image_{step}.png")
 
+
+        # Random sample
+        random_sample = torch.randn_like(pseudo_sample, device=pseudo_sample.device, dtype=pseudo_sample.dtype)
+        frames_random = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = random_sample,  decode_chunk_size=8, generator=generator).frames[0]
         frames = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = pseudo_sample,  decode_chunk_size=8, generator=generator).frames[0]
 
         export_to_video(frames, f"/mnt/e/13_Jasper_diffused_samples/training/output/vids/videojap_{step}.avi", fps=7)
+        export_to_video(frames_random, f"/mnt/e/13_Jasper_diffused_samples/training/output/vids/videojap_random_{step}.avi", fps=7)
         return
 
 

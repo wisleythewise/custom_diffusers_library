@@ -683,7 +683,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV10global_",
+                "tracker_project_name": "trainingTheUnetV11",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -887,7 +887,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 loss = loss.mean()
 
                 # loss = F.mse_loss(noise_pred.float(), noise_total.float(), reduction="mean")
-                # print(f"this is the loss: {loss}")
+                print(f"this is the loss: {loss}")
 
                 accelerator.backward(loss)
 
@@ -927,12 +927,14 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % 200 == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                    if global_step % 20 == 0:
                         try:
                             validation_video(batch, pipe_with_controlnet, controlnet, unet, tokenizer, text_encoder, global_step) 
                         except Exception as e:
                             print(e)
+
+                    if global_step % 200 == 0:
+                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if True :
                             checkpoints = os.listdir(output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
@@ -974,7 +976,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                                             
                             
                      
-                        torch.save(checkpoint, f'{output_dir}/test/model_checkpoint_{step}.ckpt')
+                        torch.save(checkpoint, f'{output_dir}/test/model_checkpoint_{global_step}.ckpt')
 
 
 
@@ -1016,7 +1018,7 @@ if __name__ == "__main__":
 
 
     main(
-        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_controlnet_param",
+        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_maybe_final",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
         gradient_accumulation_steps=1,
         mixed_precision="fp16",

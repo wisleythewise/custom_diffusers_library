@@ -177,6 +177,7 @@ class StableVideoDiffusionPipeline(DiffusionPipeline):
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
+
             image_latents = torch.cat([negative_image_latents, image_latents])
 
         # duplicate image_latents for each generation per prompt, using mps friendly method

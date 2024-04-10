@@ -16,6 +16,92 @@ from .unet_3d_blocks import UNetMidBlockSpatioTemporal, get_down_block, get_up_b
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+class CustomConditioningNetForUnet(nn.Module):
+    def __init__(self,output_size=(40, 64), num_channels=4):
+        super().__init__()
+        self.num_channels = num_channels
+        self.output_size = output_size
+
+        # Adjust the channel dimensions to keep them fixed at 4
+        # While also implementing downsampling to reach the target spatial dimensions.
+        # A series of Conv2d and SiLU layers are defined with kernel_size=3, stride=2, and padding=1
+        # This will progressively halve the spatial dimensions while retaining the number of channels.
+        self.downsampling_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
+                nn.SiLU()
+                
+            ),
+            # Additional downsampling blocks as needed
+        ])
+
+        # The last spatial dimension will be reduced to slightly larger than the target size.
+        # The exact layers needed will depend on the initial size and the amount of downsampling required.
+
+        # Final adjustment to match the target spatial dimensions (40, 60).
+        # Using adaptive pooling to ensure the output matches the desired size.
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(self.output_size)
+
+        self.conv_out = zero_module(
+            nn.Conv2d(4, 4, kernel_size=3, padding=1)
+        )
+
+    def cast_model_to(self, device, dtype):
+        """
+        Casts all parameters and buffers of a given model to the specified device and data type.
+
+        Parameters:
+        - model: An instance of torch.nn.Module whose parameters and buffers are to be cast.
+        - device: The target device (e.g., 'cuda:0', 'cpu').
+        - dtype: The target data type (e.g., torch.float32, torch.float16).
+
+        Returns:
+        - The model with its parameters and buffers cast to the specified device and data type.
+        """
+        # Cast all parameters to the specified device and dtype.
+
+        # Make sure grad is enabled
+        for param in self.parameters():
+
+            param.requires_grad = True 
+
+        for param in self.parameters():
+            param.data = param.data.to(device=device, dtype=dtype)
+            if param.requires_grad and param.grad is not None:
+                param.grad.data = param.grad.data.to(device=device, dtype=dtype)
+
+        # Cast all buffers (non-learnable parameters, e.g., running mean in BatchNorm) to the specified device and dtype.
+        for buffer in self.buffers():
+            buffer.data = buffer.data.to(device=device, dtype=dtype)
+        return
+
+    def forward(self, x, do_classifier_free=False):
+        # print("this is the input shape", x.shape)
+
+        for layer in self.downsampling_layers:
+            x = layer(x)
+
+        x = self.adaptive_pool(x)
+        x = self.conv_out(x)
+        x = x.unsqueeze(0)
+
+        # print("this is the output shape", x.shape)
+        if do_classifier_free:
+            x = torch.cat([x, x])
+        
+        return x
+
+def zero_module(module):
+    for p in module.parameters():
+        nn.init.zeros_(p)
+    return module
+    
+
+
 @dataclass
 class UNetSpatioTemporalConditionOutput(BaseOutput):
     """
@@ -374,6 +460,7 @@ class UNetSpatioTemporalConditionModel(ModelMixin, ConfigMixin, UNet2DConditionL
         down_block_additional_residuals: Optional[Tuple[torch.Tensor]] = None,
         mid_block_additional_residual: Optional[torch.Tensor] = None,
     ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
+        
         r"""
         The [`UNetSpatioTemporalConditionModel`] forward method.
 

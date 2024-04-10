@@ -40,13 +40,39 @@ from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, is_wandb_available, make_image_grid
 from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
-from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion_with_controlnet import StableVideoDiffusionPipelineWithControlNet,SpatioTemporalControlNet, CustomConditioningNet, SpatioTemporalControlNetOutput
+from diffusers.pipelines.stable_video_diffusion.pipeline_stable_video_diffusion_with_controlnet import StableVideoDiffusionPipelineWithWrapper, wrapperModel, StableVideoDiffusionPipelineWithControlNet,SpatioTemporalControlNet, CustomConditioningNet, SpatioTemporalControlNetOutput
 import gc
 from diffusers import DiffusionPipeline
-
+import torch.nn as nn
 
 from diffusers.image_processor import VaeImageProcessor
 
+def image_augmentation(images, p):
+    # check how many dima 
+    number_of_dims = len(images.shape)
+
+    if p > 0.5:
+        images = torch.flip(images, dims=(number_of_dims - 1,))
+    return images
+
+def get_mass_center(numpy_array):
+    width, height = numpy_array.shape
+    counter = 0
+    sum_x = 0
+    sum_y = 0
+    for x in range(width):
+        for y in range(height):
+            # Get the value
+            value = numpy_array[x, y]
+            if value > 0:
+                # Add to the sum
+                sum_x += x
+                sum_y += y
+                counter += 1
+            
+
+            # Center of mass
+    return (sum_x / counter, sum_y / counter)
 
 # accelerate config
 # accelerate config default
@@ -90,37 +116,58 @@ def _append_dims(x, target_dims):
         raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
     return x[(...,) + (None,) * dims_to_append]
 
-def validation_video(batch, pipe, control_net_trained, unet, tokenizer, text_encoder, step):
+def validation_video(batch, pipe, control_net_trained, unet, tokenizer, text_encoder, step, wrapper_model = None):
     with torch.no_grad():
-        pipe_with_controlnet = StableVideoDiffusionPipelineWithControlNet(
-        vae = pipe.vae,
-        image_encoder = pipe.image_encoder,
-        unet=unet,
-        scheduler=pipe.scheduler,
-        feature_extractor=pipe.feature_extractor,
-        controlnet=control_net_trained,
-        tokenizer = tokenizer,
-        text_encoder = text_encoder
+        # pipe_with_controlnet = StableVideoDiffusionPipelineWithControlNet(
+        # vae = pipe.vae,
+        # image_encoder = pipe.image_encoder,
+        # unet=unet,
+        # scheduler=pipe.scheduler,
+        # feature_extractor=pipe.feature_extractor,
+        # controlnet=control_net_trained,
+        # tokenizer = tokenizer,
+        # text_encoder = text_encoder
+        # )
+
+
+        pipe_with_wrapper = StableVideoDiffusionPipelineWithWrapper(
+            vae = pipe.vae,
+            image_encoder = pipe.image_encoder,
+            scheduler=pipe.scheduler,
+            feature_extractor=pipe.feature_extractor,
+            wrapper = wrapper_model
         )
+
 
         # Normal
         prompt = "A driving scene during the night, with rainy weather in boston-seaport"
         # prompt = batch['caption']
         pseudo_sample = batch['conditioning'].flatten(0,1)
         # Define a simple torch generator
-        generator = torch.Generator().manual_seed(42)
-        image = batch['reference_image']
+        generator = torch.Generator(device=torch.device("cuda")).manual_seed(int(step))
+        random_numner = torch.rand(1, device=torch.device("cuda"), generator=generator).item()
+
+        print(" this si sthe random number", random_numner)
+        print(" this si shte true or false", random_numner > 1.5)
+        if random_numner > 0.5:
+            image = batch['reference_image']
+        else:
+            image = batch['reference_image_prescan']
+
         # Save the image
         image.save(f"/mnt/e/13_Jasper_diffused_samples/training/output/images/image_{step}.png")
 
+        # print_sum_of_weights_for_zero_initialized_layers(control_net_trained)
 
-        # Random sample
-        random_sample = torch.randn_like(pseudo_sample, device=pseudo_sample.device, dtype=pseudo_sample.dtype)
-        frames_random = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = random_sample,  decode_chunk_size=8, generator=generator).frames[0]
-        frames = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = pseudo_sample,  decode_chunk_size=8, generator=generator).frames[0]
+        # reverse the conditioneing frames that is the first dim
+        random_sample = batch['conditioning'].flip(1).flatten(0,1)
+        honden = pipe_with_wrapper(height=320,width=512, image=image,conditioning_image=pseudo_sample ,num_frames = 14,  decode_chunk_size=8, generator=generator).frames[0]
+        honden1 = pipe_with_wrapper(height=320,width=512, image=image,conditioning_image=random_sample ,num_frames = 14,  decode_chunk_size=8, generator=generator).frames[0]
+        # frames_random = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = random_sample,  decode_chunk_size=8, generator=generator).frames[0]
+        # frames = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = pseudo_sample,  decode_chunk_size=8, generator=generator).frames[0]
 
-        export_to_video(frames, f"/mnt/e/13_Jasper_diffused_samples/training/output/vids/videojap_{step}.avi", fps=7)
-        export_to_video(frames_random, f"/mnt/e/13_Jasper_diffused_samples/training/output/vids/videojap_random_{step}.avi", fps=7)
+        export_to_video(honden, f"/mnt/e/13_Jasper_diffused_samples/training/output/vids/videojap_{step}.avi", fps=7)
+        export_to_video(honden1, f"/mnt/e/13_Jasper_diffused_samples/training/output/vids/videojap_random_{step}.avi", fps=7)
         return
 
 
@@ -203,6 +250,8 @@ class DiffusionDataset(Dataset):
         # Processing reference images (single per scene, matched by index)
         reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
 
+        reference_image_prescan = self.transform(Image.open(self.data['prescan_images'][idx][0]))
+
         # Retrieving the corresponding caption
         caption = self.data['caption'][idx][0]
 
@@ -213,6 +262,7 @@ class DiffusionDataset(Dataset):
             "conditioning": torch.stack(conditioned_images),
             "caption": caption,
             "reference_image": reference_image,
+            "reference_image_prescan": reference_image_prescan,
             "prescan_images": prescan_images
         }
 
@@ -222,6 +272,7 @@ def collate_fn(batch):
     prescan_images = torch.stack([item['prescan_images'] for item in batch])
     captions = [item['caption'] for item in batch]  # List of strings, no need to stack
     reference_images = [item['reference_image'] for item in batch]
+    reference_images_prescan = [item['reference_image_prescan'] for item in batch]
     
 
     return {
@@ -229,6 +280,7 @@ def collate_fn(batch):
         "conditioning": conditioning,
         "caption": captions[0],
         "reference_image": reference_images[0],
+        "reference_image_prescan": reference_images_prescan[0],
         "prescan_images": prescan_images
     }
 
@@ -430,11 +482,6 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
     # Load the models
     weight_dtype = torch.float16
-    # if accelerator.mixed_precision == "fp16":
-    #     weight_dtype = torch.float16
-    # elif accelerator.mixed_precision == "bf16":
-    #     weight_dtype = torch.bfloat16
-
     # Importing the pipelines
     pipe = StableVideoDiffusionPipeline.from_pretrained(
         "stabilityai/stable-video-diffusion-img2vid", torch_dtype=torch.float16, variant="fp16"
@@ -442,19 +489,20 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     pipeline = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-2")
 
 
+
+
     # # Getting the models
 
     if train_unet:
-        my_net =  UNetSpatioTemporalConditionModel()
-        unet_weights = pipe.unet.state_dict()
-        my_net.load_state_dict(unet_weights)
 
-        # checkpoint = torch.load('/mnt/e/13_Jasper_diffused_samples/training/unet_uncoditional/test/model_checkpoint_239.ckpt') 
-        # my_net.load_state_dict(checkpoint['unet_state_dict']) 
-        
-        
-        control_net = SpatioTemporalControlNet.from_unet(my_net)
-        control_net = control_net.half()   
+        config = {
+            "output_size": (40, 64), 
+            "num_channels": 4
+        }
+        # Create a wrapper model
+        custom_conditioning_net = CustomConditioningNet(**config)
+        my_net = pipe.unet
+        wrapper_model = wrapperModel(customConditioningNet=custom_conditioning_net, model = model)        
     else:
         my_net =  UNetSpatioTemporalConditionModel()
         unet_weights = pipe.unet.state_dict()
@@ -691,7 +739,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV11",
+                "tracker_project_name": "trainingTheUnetV12",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -754,51 +802,33 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet if train_unet else controlnet):
-                
-                # Get the timestep
-                # random_idx = torch.randint(0, 25, (1,))
-                # timestep = timesteps[random_idx]
+                generator = torch.Generator(device=accelerator.device).manual_seed(int(global_step))
 
-                # # map the batch condition to decive and dtype
-                # batch['conditioning'] = batch['conditioning'].to(device=accelerator.device, dtype=weight_dtype)
-                
-                
+                # get a random number between 0 and 1
+                random_number = torch.rand(1, device=accelerator.device, generator=generator).item()
+
+                if random_number < 1.5:
+                    working_images = batch['prescan_images']
+                else:
+                    working_images = batch['ground_truth']
+
+                # flip the image with a 50% chance
+                working_images = image_augmentation(working_images, random_number)
+                batch['conditioning'] = image_augmentation(batch['conditioning'], random_number)
+
                 # # Get all the inputs
                 inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'], num_frames=14)
-                # to_encode = batch["ground_truth"] if not train_unet else batch["prescan_images"]
-                # latents = vae.encode(to_encode.to(dtype=weight_dtype, device=accelerator.device)).latent_dist.sample() 
                 
-                # latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
-                # latent_model_input = latent_model_input * vae.config.scaling_factor 
-                # latent_model_input = latent_model_input.unsqueeze(0)
-                # # latent_model_input = torch.cat([latent_model_input] * 2) 
-
-
-
-                # noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
-                # noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
-
-                # # Concatenate image_latents over channels dimention get only the first dim
-                # image_latents = inputs['image_latents'][:1]
-                # latent_model_input = torch.cat([noisy_latents, image_latents], dim=2)
-
-
-                # # Add some zeros for the unconditional generation
-                # zeros = torch.zeros_like(latent_model_input)
-
-                # noisy_latents = torch.cat([latent_model_input, zeros],dim=0)
-                # noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
-
-                pixel_values = batch["ground_truth"].to(weight_dtype).to(
+                pixel_values = working_images.to(weight_dtype).to(
                     accelerator.device, non_blocking=True
                 )
-                # pixel_values_conditional = batch["prescan_images"].to(weight_dtype).to(
-                #     accelerator.device, non_blocking=True
-                # )
                 conditional_pixel_values = pixel_values[:, 0:1, :, :, :]
                 
                 encoder_hidden_states = encode_image(
                     pixel_values[:, 0, :, :, :].float(), feature_extractor=feature_extractor, image_encoder=image_encoder, accelerator=accelerator, weight_dtype=weight_dtype)
+                
+                encoder_hidden_states_controlnet = inputs["controlnet_encoder_hidden_states"][1:]
+                controlnet_condition = inputs["controlnet_condition"].flatten(0,1)
 
                 latents = tensor_to_vae_latent(pixel_values, vae)
 
@@ -827,6 +857,44 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 inp_noisy_latents = noisy_latents / ((sigmas**2 + 1) ** 0.5)
                 timesteps = timesteps.to(device=accelerator.device, dtype=weight_dtype)
 
+                if True:
+                    random_p = torch.rand(
+                        bsz, device=torch.device("cuda"), generator=generator)
+                    # Sample masks for the edit prompts.
+                    prompt_mask = random_p < 2 * 0.05
+                    prompt_mask = prompt_mask.reshape(bsz, 1, 1)
+                    # Final text conditioning.
+                    null_conditioning = torch.zeros_like(encoder_hidden_states)
+                    encoder_hidden_states = torch.where(
+                        prompt_mask, null_conditioning.unsqueeze(1), encoder_hidden_states.unsqueeze(1))
+                    # Sample masks for the original images.
+                    image_mask_dtype = weight_dtype
+                    image_mask = 1 - (
+                        (random_p >= 0.05).to(
+                            image_mask_dtype)
+                        * (random_p < 3 * 0.05).to(image_mask_dtype)
+                    )
+                    image_mask = image_mask.reshape(bsz, 1, 1, 1)
+                    # Final image conditioning.
+                    conditional_latents = image_mask * conditional_latents
+
+                    # also corrupt random patches of the image
+
+                    unique_random_p = torch.rand(bsz, device=torch.device("cuda"), generator=generator)
+
+                    # Create a unique mask based on a different condition, e.g., a different range or logic
+                    # Here, using a threshold that differs from the previous masks
+                    unique_mask_condition = unique_random_p > 0.1  # Adjust the threshold as needed
+
+                    # Reshape the mask to match the dimensions of controlnet_condition, if necessary
+                    # Assuming controlnet_condition's dimensions require a single dimension mask here
+                    unique_mask = unique_mask_condition.reshape(bsz, 1, 1, 1)
+
+
+                    # add a mask for the controlnet con
+                    controlnet_condition = controlnet_condition * unique_mask
+
+
                 conditional_latents = conditional_latents.unsqueeze(
                     1).repeat(1, noisy_latents.shape[1], 1, 1, 1)
                 inp_noisy_latents = torch.cat(
@@ -849,7 +917,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
                 if train_unet:
                     model_pred = unet(
-                        inp_noisy_latents, timesteps,encoder_hidden_states=inputs["unet_encoder_hidden_states"][:1], added_time_ids = added_time_ids).sample
+                        inp_noisy_latents, timesteps,encoder_hidden_states=encoder_hidden_states, added_time_ids = added_time_ids).sample
                                     
                     
 
@@ -857,20 +925,21 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     down_block_res_samples, mid_block_res_sample = controlnet.forward(
                         inp_noisy_latents,
                         timesteps,
-                        encoder_hidden_states= inputs["controlnet_encoder_hidden_states"][:1], 
+                        encoder_hidden_states= encoder_hidden_states_controlnet, 
                         added_time_ids= added_time_ids,
                         return_dict=False,
-                        controlnet_condition = inputs['controlnet_condition'].flatten(0,1),
+                        controlnet_condition = controlnet_condition,
                         training = True
                     )
                 # predict the noise residual
+                    print("this is the mid mean", mid_block_res_sample.abs().mean())
 
 
                 
                     model_pred = unet(
                         inp_noisy_latents,
                         timesteps,
-                        encoder_hidden_states= inputs["unet_encoder_hidden_states"][:1],
+                        encoder_hidden_states= encoder_hidden_states,
                         added_time_ids= added_time_ids,
                         down_block_additional_residuals= down_block_res_samples,
                         mid_block_additional_residual = mid_block_res_sample,
@@ -935,7 +1004,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % 20 == 0 or global_step == 1:
+                    if global_step % 1 == 0 or global_step == 0 or global_step == 1:
                         try:
                             validation_video(batch, pipe_with_controlnet, controlnet, unet, tokenizer, text_encoder, global_step) 
                         except Exception as e:
@@ -1028,7 +1097,7 @@ if __name__ == "__main__":
     main(
         output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_maybe_final",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=20,
         mixed_precision="fp16",
         hub_model_id="temporalControlNet",
     )

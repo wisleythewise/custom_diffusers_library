@@ -16,6 +16,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Union
 import gc
+import os
 import numpy as np
 import PIL.Image
 import torch
@@ -91,7 +92,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class CustomConditioningNet(nn.Module):
+class CustomConditioningNet(ModelMixin, ConfigMixin ):
     def __init__(self,output_size=(40, 64), num_channels=4):
         super().__init__()
         self.num_channels = num_channels
@@ -113,14 +114,10 @@ class CustomConditioningNet(nn.Module):
             ),
             # Additional downsampling blocks as needed
         ])
+        self.adaptive_pool = nn.AdaptiveAvgPool2d(output_size=self.output_size)
 
         # The last spatial dimension will be reduced to slightly larger than the target size.
         # The exact layers needed will depend on the initial size and the amount of downsampling required.
-
-        # Final adjustment to match the target spatial dimensions (40, 60).
-        # Using adaptive pooling to ensure the output matches the desired size.
-        self.adaptive_pool = nn.AdaptiveAvgPool2d(self.output_size)
-
 
     def cast_model_to(self, device, dtype):
         """
@@ -172,10 +169,21 @@ class wrapperModel(nn.Module):
         super().__init__()
         self.custom_conditioning_net =customConditioningNet
         self.model = model
+        self._dtype = torch.float16 # Default dtype
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    def to(self, *args, **kwargs):
+        self._dtype = kwargs.get('dtype', self._dtype)
+        super(wrapperModel, self).to(*args, **kwargs)
+        return self
 
     def cast_model_to(self, device, dtype):
         self.custom_conditioning_net.cast_model_to(device, dtype)
         self.model = self.model.to(device, dtype)
+        return
 
     def forward(self, 
                 x, 
@@ -188,8 +196,12 @@ class wrapperModel(nn.Module):
         # Create the conditioning
         conditioning = self.custom_conditioning_net.forward(x=conditioning, do_classifier_free=do_classifier_free)
         conditioning = conditioning.to(dtype=x.dtype, device=x.device)
+
+        print(f"Conditioning shape: {conditioning.shape}")
+
+        print(f"X shape: {x.shape}")
         
-        x = torch.cat([x, conditioning], dim=2)
+        x[:,:,4:, :, :] += conditioning
 
         # predict the noise residual
         noise_pred = self.model(
@@ -676,7 +688,6 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
                 raise ValueError(f"Jappie Controlnet condition shape {controlnet_condition.shape} does not match the sample shape {sample.shape}")
         else:
             controlnet_condition = torch.zeros_like(sample).to(sample.device, dtype=sample.dtype)
-        print("this is the shape of the controlnet condition", controlnet_condition.mean())
         sample += controlnet_condition
 
 
@@ -1792,7 +1803,6 @@ class StableVideoDiffusionPipelineWithWrapper(DiffusionPipeline):
         super().__init__()
 
 
-
         self.register_modules(
             vae=vae,
             image_encoder=image_encoder,
@@ -1804,6 +1814,15 @@ class StableVideoDiffusionPipelineWithWrapper(DiffusionPipeline):
         print(f"VAE scale factor: {self.vae_scale_factor}") 
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
         self.wrapper = wrapper
+
+    @property
+    def _execution_device(self):
+        # Assuming there's logic here to determine the device, for demonstration
+        return self.__execution_device
+
+    @_execution_device.setter
+    def _execution_device(self, value):
+        self.__execution_device = value
 
     def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance):
         dtype = next(self.image_encoder.parameters()).dtype
@@ -2116,9 +2135,22 @@ class StableVideoDiffusionPipelineWithWrapper(DiffusionPipeline):
         if needs_upcasting:
             self.vae.to(dtype=torch.float32)
 
+        image_latents = self._encode_vae_image(
+            image,
+            device=device,
+            num_videos_per_prompt=num_videos_per_prompt,
+            do_classifier_free_guidance=self.do_classifier_free_guidance,
+        )
+        image_latents = image_latents.to(image_embeddings.dtype)
+
         # cast back to fp16 if needed
         if needs_upcasting:
             self.vae.to(dtype=torch.float16)
+
+        # Repeat the image latents for each frame so we can concatenate them with the noise
+        # image_latents [batch, channels, height, width] ->[batch, num_frames, channels, height, width]
+        # print(f"Shape of image latents before the unsqueeze: {image_latents.shape}")
+        image_latents = image_latents.unsqueeze(1).repeat(1, num_frames, 1, 1, 1)
 
         # 5. Get Added Time IDs
         added_time_ids = self._get_add_time_ids(
@@ -2173,11 +2205,12 @@ class StableVideoDiffusionPipelineWithWrapper(DiffusionPipeline):
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
+                latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
+
                 # Print the arguments shape and value of t
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
 
-                print(f" this is the shape of the latent model input: {latent_model_input.shape} ")
                
 
                 # predict the noise residual
@@ -2191,7 +2224,6 @@ class StableVideoDiffusionPipelineWithWrapper(DiffusionPipeline):
                 )
 
 
-                print(f" this si the value of the noise pred: {noise_pred.shape}")
 
 
                 # perform guidance

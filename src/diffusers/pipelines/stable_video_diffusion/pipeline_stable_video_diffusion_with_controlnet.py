@@ -1823,6 +1823,8 @@ class StableVideoDiffusionPipelineWithWrapper(DiffusionPipeline):
     @_execution_device.setter
     def _execution_device(self, value):
         self.__execution_device = value
+    
+    
 
     def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance):
         dtype = next(self.image_encoder.parameters()).dtype
@@ -1865,6 +1867,33 @@ class StableVideoDiffusionPipelineWithWrapper(DiffusionPipeline):
             image_embeddings = torch.cat([negative_image_embeddings, image_embeddings])
 
         return image_embeddings
+    
+
+    def _encode_vae_image(
+        self,
+        image: torch.Tensor,
+        device,
+        num_videos_per_prompt,
+        do_classifier_free_guidance,
+    ):
+        
+
+        # print(f"this is the shape of the image: {image.shape}")
+        image = image.to(device=device)
+        image_latents = self.vae.encode(image).latent_dist.mode()
+        # print(f"this is the shape of the image latents die je nu wilt hebbetn: {image_latents.shape}")
+        if do_classifier_free_guidance:
+            negative_image_latents = torch.zeros_like(image_latents)
+
+            # For classifier free guidance, we need to do two forward passes.
+            # Here we concatenate the unconditional and text embeddings into a single batch
+            # to avoid doing two forward passes
+            image_latents = torch.cat([negative_image_latents, image_latents])
+
+        # duplicate image_latents for each generation per prompt, using mps friendly method
+        image_latents = image_latents.repeat(num_videos_per_prompt, 1, 1, 1)
+
+        return image_latents
 
     def _get_add_time_ids(
         self,

@@ -130,7 +130,7 @@ def validation_video(batch, pipe, pipe_with_wrapper, step, unet, conditioning_mo
         random_numner = torch.rand(1, device=torch.device("cuda"), generator=generator).item()
 
 
-        if random_numner > 0.999:
+        if random_numner < 0.999:
             image = batch['reference_image']
         else:
             image = batch['reference_image_prescan']
@@ -649,7 +649,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV13",
+                "tracker_project_name": "trainingTheUnetV14",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -737,7 +737,15 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 pixel_values = working_images.to(dtype=weight_dtype, device=accelerator.device)
 
                 conditional_pixel_values = custom_conditioning_net.forward(batch['conditioning'].flatten(0,1).to(dtype=weight_dtype, device=accelerator.device), do_classifier_free=False)
-                conditional_pixel_values = conditional_pixel_values.to(device=accelerator.device, dtype=weight_dtype) 
+                conditional_pixel_values = conditional_pixel_values.to(device=accelerator.device, dtype=weight_dtype)
+
+                conditional_pixel_values_image = pixel_values[:, 0:1, :, :, :]
+                conditional_latents_image = tensor_to_vae_latent(conditional_pixel_values_image, vae)[:, 0, :, :, :]
+                conditional_latents_image = conditional_latents_image / vae.config.scaling_factor
+                conditional_latents_image = conditional_latents_image.unsqueeze(
+                    1).repeat(1, conditional_pixel_values.shape[1], 1, 1, 1) 
+                
+                conditional_pixel_values += conditional_latents_image
                 
                 encoder_hidden_states = encode_image(
                     pixel_values[:, 0, :, :, :].float(), feature_extractor=feature_extractor, image_encoder=image_encoder, accelerator=accelerator, weight_dtype=weight_dtype)

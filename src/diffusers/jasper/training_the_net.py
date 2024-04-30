@@ -115,7 +115,7 @@ def validation_video(batch, pipe, control_net_trained, unet, tokenizer, text_enc
 
 
         # Random sample
-        random_sample = torch.randn_like(pseudo_sample, device=pseudo_sample.device, dtype=pseudo_sample.dtype)
+        random_sample = torch.ones_like(pseudo_sample, device=pseudo_sample.device, dtype=pseudo_sample.dtype)
         frames_random = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = random_sample,  decode_chunk_size=8, generator=generator).frames[0]
         frames = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = pseudo_sample,  decode_chunk_size=8, generator=generator).frames[0]
 
@@ -207,21 +207,21 @@ class DiffusionDataset(Dataset):
 
         # Retrieving the corresponding caption
         caption = self.data['caption'][idx][0]
+        reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
 
         
 
         return {
             "ground_truth": ground_truth_images,
-            "conditioning": torch.stack(conditioning_images_one),
+            "conditioning": conditioning_images_one,
             "caption": caption,
-            # "reference_image": reference_image,
+            "reference_image": reference_image,
             # "prescan_images": prescan_images
         }
 
 def collate_fn(batch):
     ground_truth = torch.stack([item['ground_truth'] for item in batch])
     conditioning = torch.stack([item['conditioning'] for item in batch])
-    prescan_images = torch.stack([item['prescan_images'] for item in batch])
     captions = [item['caption'] for item in batch]  # List of strings, no need to stack
     reference_images = [item['reference_image'] for item in batch]
     
@@ -230,8 +230,7 @@ def collate_fn(batch):
         "ground_truth": ground_truth,
         "conditioning": conditioning,
         "caption": captions[0],
-        # "reference_image": reference_images[0],
-        # "prescan_images": prescan_images
+        "reference_image": reference_images[0],
     }
 
 def encode_image(pixel_values, feature_extractor, image_encoder, accelerator, weight_dtype):
@@ -591,7 +590,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         eps=adam_epsilon,
     )
 
-    train_dataset = DiffusionDataset(json_path='/home/wisley/custom_diffusers_library/src/diffusers/jasper/complete_data_paths.json')
+    train_dataset = DiffusionDataset(json_path='/home/wisley/custom_diffusers_library/src/diffusers/jasper/jappie_seg.json')
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -693,7 +692,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV11",
+                "tracker_project_name": "FinalVideo",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -757,7 +756,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet if train_unet else controlnet):
-                
+
                 # # Get all the inputs
                 inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'], num_frames=14)
 

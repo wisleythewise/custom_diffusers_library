@@ -103,7 +103,7 @@ class CustomConditioningNet(nn.Module):
         # This will progressively halve the spatial dimensions while retaining the number of channels.
         self.downsampling_layers = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(self.num_channels-1, self.num_channels, kernel_size=3, stride=2, padding=1),
                 nn.SiLU(),
                 nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
                 nn.SiLU(),

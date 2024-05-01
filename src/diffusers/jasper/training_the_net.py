@@ -127,13 +127,10 @@ def validation_video(batch, pipe, pipe_with_wrapper, step, unet, conditioning_mo
         random_sample = batch['conditioning'].flip(1).flatten(0,1).to(torch.device('cuda'), dtype=torch.float16)
 
         generator = torch.Generator(device=torch.device("cuda")).manual_seed(int(step))
-        random_numner = torch.rand(1, device=torch.device("cuda"), generator=generator).item()
 
 
-        if random_numner < 0.999:
-            image = batch['reference_image']
-        else:
-            image = batch['reference_image_prescan']
+        image = batch['reference_image']
+
 
         # Save the image
         image.save(f"/mnt/e/13_Jasper_diffused_samples/training/output/images/image_{step}.png")
@@ -188,12 +185,15 @@ from torchvision import transforms
 from PIL import Image
 import json
 
+
 class DiffusionDataset(Dataset):
     def __init__(self, json_path):
         with open(json_path, 'r') as f:
             self.data = json.load(f)
+        self.image_factor_x = 360 / 320    
+        self.image_factor_y = 640 / 512
         self.transform = transforms.Compose([
-            transforms.Resize((320, 512)),
+            transforms.Resize((int(360/self.image_factor_y) , int(640/self.image_factor_x))),
             transforms.CenterCrop((320, 512)),
         ])
         self.image_processor = VaeImageProcessor(vae_scale_factor=8)
@@ -208,46 +208,42 @@ class DiffusionDataset(Dataset):
         ground_truth_images = [self.transform(Image.open(path)) for path in self.data['ground_truth'][idx]]
         ground_truth_images = self.image_processor.preprocess(image = ground_truth_images, height = 320, width = 512)
 
-        prescan_images = [self.transform(Image.open(path)) for path in self.data['prescan_images'][idx]]
-        prescan_images = self.image_processor.preprocess(image = prescan_images, height = 320, width = 512)
+        # prescan_images = [self.transform(Image.open(path)) for path in self.data['prescan_images'][idx]]
+        # prescan_images = self.image_processor.preprocess(image = prescan_images, height = 320, width = 512)
 
         # Processing conditioning images set one (assuming RGB, 4 channels after conversion)
         conditioning_images_one = [self.transform(Image.open(path)) for path in self.data['conditioning_images_one'][idx]]
         conditioning_images_one = self.image_processor.preprocess(image = conditioning_images_one, height = 320, width = 512)
 
         # Processing conditioning images set two (assuming grayscale, converted to RGB to match dimensions)
-        conditioning_images_two = [self.transform(Image.open(path)) for path in self.data['conditioning_images_two'][idx]]
-        conditioning_images_two = self.image_processor.preprocess(image = conditioning_images_two, height = 320, width = 512)
+        # conditioning_images_two = [self.transform(Image.open(path)) for path in self.data['conditioning_images_two'][idx]]
+        # conditioning_images_two = self.image_processor.preprocess(image = conditioning_images_two, height = 320, width = 512)
         
         # Concatenating condition one and two images along the channel dimension
-        conditioned_images = [torch.cat((img_one, img_two), dim=0) for img_one, img_two in zip(conditioning_images_one, conditioning_images_two)]
+        # conditioned_images = [torch.cat((img_one, img_two), dim=0) for img_one, img_two in zip(conditioning_images_one, conditioning_images_two)]
 
         # Processing reference images (single per scene, matched by index)
-        reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
-
-        reference_image_prescan = self.transform(Image.open(self.data['prescan_images'][idx][0]))
+        # reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
 
         # Retrieving the corresponding caption
         caption = self.data['caption'][idx][0]
+        reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
 
         
 
         return {
             "ground_truth": ground_truth_images,
-            "conditioning": torch.stack(conditioned_images),
+            "conditioning": conditioning_images_one,
             "caption": caption,
             "reference_image": reference_image,
-            "reference_image_prescan": reference_image_prescan,
-            "prescan_images": prescan_images
+            # "prescan_images": prescan_images
         }
 
 def collate_fn(batch):
     ground_truth = torch.stack([item['ground_truth'] for item in batch])
     conditioning = torch.stack([item['conditioning'] for item in batch])
-    prescan_images = torch.stack([item['prescan_images'] for item in batch])
     captions = [item['caption'] for item in batch]  # List of strings, no need to stack
     reference_images = [item['reference_image'] for item in batch]
-    reference_images_prescan = [item['reference_image_prescan'] for item in batch]
     
 
     return {
@@ -255,8 +251,6 @@ def collate_fn(batch):
         "conditioning": conditioning,
         "caption": captions[0],
         "reference_image": reference_images[0],
-        "reference_image_prescan": reference_images_prescan[0],
-        "prescan_images": prescan_images
     }
 
 def encode_image(pixel_values, feature_extractor, image_encoder, accelerator, weight_dtype):
@@ -649,7 +643,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV14",
+                "tracker_project_name": "wrapper_seg",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -725,10 +719,8 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # get a random number between 0 and 1
                 random_number = torch.rand(1, device=accelerator.device, generator=generator).item()
 
-                if random_number < 0.001:
-                    working_images = batch['prescan_images']
-                else:
-                    working_images = batch['ground_truth']
+
+                working_images = batch['ground_truth']
 
                 # flip the image with a 50% chance
                 working_images = image_augmentation(working_images, random_number)
@@ -990,9 +982,9 @@ if __name__ == "__main__":
 
 
     main(
-        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_maybe_final",
+        output_dir="/mnt/e/13_Jasper_diffused_samples/training/wrapper",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
-        gradient_accumulation_steps=20,
+        gradient_accumulation_steps=1,
         mixed_precision="fp16",
         hub_model_id="temporalControlNet",
     )

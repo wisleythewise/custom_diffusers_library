@@ -115,7 +115,7 @@ def validation_video(batch, pipe, control_net_trained, unet, tokenizer, text_enc
 
 
         # Random sample
-        random_sample = torch.randn_like(pseudo_sample, device=pseudo_sample.device, dtype=pseudo_sample.dtype)
+        random_sample = torch.ones_like(pseudo_sample, device=pseudo_sample.device, dtype=pseudo_sample.dtype)
         frames_random = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = random_sample,  decode_chunk_size=8, generator=generator).frames[0]
         frames = pipe_with_controlnet( image = image,num_frames = 14, prompt=prompt, conditioning_image = pseudo_sample,  decode_chunk_size=8, generator=generator).frames[0]
 
@@ -170,8 +170,10 @@ class DiffusionDataset(Dataset):
     def __init__(self, json_path):
         with open(json_path, 'r') as f:
             self.data = json.load(f)
+        self.image_factor_x = 360 / 320    
+        self.image_factor_y = 640 / 512
         self.transform = transforms.Compose([
-            transforms.Resize((320, 512)),
+            transforms.Resize((int(360/self.image_factor_y) , int(640/self.image_factor_x))),
             transforms.CenterCrop((320, 512)),
         ])
         self.image_processor = VaeImageProcessor(vae_scale_factor=8)
@@ -186,40 +188,40 @@ class DiffusionDataset(Dataset):
         ground_truth_images = [self.transform(Image.open(path)) for path in self.data['ground_truth'][idx]]
         ground_truth_images = self.image_processor.preprocess(image = ground_truth_images, height = 320, width = 512)
 
-        prescan_images = [self.transform(Image.open(path)) for path in self.data['prescan_images'][idx]]
-        prescan_images = self.image_processor.preprocess(image = prescan_images, height = 320, width = 512)
+        # prescan_images = [self.transform(Image.open(path)) for path in self.data['prescan_images'][idx]]
+        # prescan_images = self.image_processor.preprocess(image = prescan_images, height = 320, width = 512)
 
         # Processing conditioning images set one (assuming RGB, 4 channels after conversion)
         conditioning_images_one = [self.transform(Image.open(path)) for path in self.data['conditioning_images_one'][idx]]
         conditioning_images_one = self.image_processor.preprocess(image = conditioning_images_one, height = 320, width = 512)
 
         # Processing conditioning images set two (assuming grayscale, converted to RGB to match dimensions)
-        conditioning_images_two = [self.transform(Image.open(path)) for path in self.data['conditioning_images_two'][idx]]
-        conditioning_images_two = self.image_processor.preprocess(image = conditioning_images_two, height = 320, width = 512)
+        # conditioning_images_two = [self.transform(Image.open(path)) for path in self.data['conditioning_images_two'][idx]]
+        # conditioning_images_two = self.image_processor.preprocess(image = conditioning_images_two, height = 320, width = 512)
         
         # Concatenating condition one and two images along the channel dimension
-        conditioned_images = [torch.cat((img_one, img_two), dim=0) for img_one, img_two in zip(conditioning_images_one, conditioning_images_two)]
+        # conditioned_images = [torch.cat((img_one, img_two), dim=0) for img_one, img_two in zip(conditioning_images_one, conditioning_images_two)]
 
         # Processing reference images (single per scene, matched by index)
-        reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
+        # reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
 
         # Retrieving the corresponding caption
         caption = self.data['caption'][idx][0]
+        reference_image = self.transform(Image.open(self.data['ground_truth'][idx][0]))
 
         
 
         return {
             "ground_truth": ground_truth_images,
-            "conditioning": torch.stack(conditioned_images),
+            "conditioning": conditioning_images_one,
             "caption": caption,
             "reference_image": reference_image,
-            "prescan_images": prescan_images
+            # "prescan_images": prescan_images
         }
 
 def collate_fn(batch):
     ground_truth = torch.stack([item['ground_truth'] for item in batch])
     conditioning = torch.stack([item['conditioning'] for item in batch])
-    prescan_images = torch.stack([item['prescan_images'] for item in batch])
     captions = [item['caption'] for item in batch]  # List of strings, no need to stack
     reference_images = [item['reference_image'] for item in batch]
     
@@ -229,7 +231,6 @@ def collate_fn(batch):
         "conditioning": conditioning,
         "caption": captions[0],
         "reference_image": reference_images[0],
-        "prescan_images": prescan_images
     }
 
 def encode_image(pixel_values, feature_extractor, image_encoder, accelerator, weight_dtype):
@@ -589,7 +590,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         eps=adam_epsilon,
     )
 
-    train_dataset = DiffusionDataset(json_path='/home/wisley/custom_diffusers_library/src/diffusers/jasper/complete_data_paths.json')
+    train_dataset = DiffusionDataset(json_path='/home/wisley/custom_diffusers_library/src/diffusers/jasper/jappie_seg.json')
 
     train_dataloader = DataLoader(
         train_dataset,
@@ -691,7 +692,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 "adam_weight_decay": 1e-2,
                 "max_grad_norm": 1.0,
                 # Add placeholders for any other arguments required for tracker initialization
-                "tracker_project_name": "trainingTheUnetV11",
+                "tracker_project_name": "FinalVideo",
                 "validation_prompt": None,  # Placeholder for the argument to be popped
                 "validation_image": None    # Placeholder for the argument to be popped
             }
@@ -748,46 +749,17 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
     scheduler.set_timesteps(25, device=accelerator.device)
     timesteps = scheduler.timesteps
+    generator = torch.Generator(device=accelerator.device).manual_seed(42)
 
     guidance_scale = None
     image_logs = None
     for epoch in range(first_epoch, num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet if train_unet else controlnet):
-                
-                # Get the timestep
-                # random_idx = torch.randint(0, 25, (1,))
-                # timestep = timesteps[random_idx]
 
-                # # map the batch condition to decive and dtype
-                # batch['conditioning'] = batch['conditioning'].to(device=accelerator.device, dtype=weight_dtype)
-                
-                
                 # # Get all the inputs
                 inputs = pipe_with_controlnet.prepare_input_for_forward(batch['reference_image'], batch['caption'], batch['conditioning'], num_frames=14)
-                # to_encode = batch["ground_truth"] if not train_unet else batch["prescan_images"]
-                # latents = vae.encode(to_encode.to(dtype=weight_dtype, device=accelerator.device)).latent_dist.sample() 
-                
-                # latent_model_input = latents.to(device=accelerator.device, dtype=weight_dtype)
-                # latent_model_input = latent_model_input * vae.config.scaling_factor 
-                # latent_model_input = latent_model_input.unsqueeze(0)
-                # # latent_model_input = torch.cat([latent_model_input] * 2) 
 
-
-
-                # noise_total = torch.randn_like(latent_model_input, device=accelerator.device)
-                # noisy_latents = scheduler.add_noise(latent_model_input, noise_total, timestep)
-
-                # # Concatenate image_latents over channels dimention get only the first dim
-                # image_latents = inputs['image_latents'][:1]
-                # latent_model_input = torch.cat([noisy_latents, image_latents], dim=2)
-
-
-                # # Add some zeros for the unconditional generation
-                # zeros = torch.zeros_like(latent_model_input)
-
-                # noisy_latents = torch.cat([latent_model_input, zeros],dim=0)
-                # noisy_latents = noisy_latents.to(device = accelerator.device, dtype = weight_dtype)
 
                 pixel_values = batch["ground_truth"].to(weight_dtype).to(
                     accelerator.device, non_blocking=True
@@ -823,9 +795,32 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 noisy_latents = latents + noise * sigmas
                 timesteps = torch.Tensor(
                     [0.25 * sigma.log() for sigma in sigmas]).to(accelerator.device)
+                
+
 
                 inp_noisy_latents = noisy_latents / ((sigmas**2 + 1) ** 0.5)
                 timesteps = timesteps.to(device=accelerator.device, dtype=weight_dtype)
+
+                if True:
+                    random_p = torch.rand(
+                        bsz, device=torch.device("cuda"), generator=generator)
+                    # Sample masks for the edit prompts.
+                    prompt_mask = random_p < 2 * 0.05
+                    prompt_mask = prompt_mask.reshape(bsz, 1, 1)
+                    # Final text conditioning.
+                    null_conditioning = torch.zeros_like(encoder_hidden_states)
+                    encoder_hidden_states = torch.where(
+                        prompt_mask, null_conditioning.unsqueeze(1), encoder_hidden_states.unsqueeze(1))
+                    # Sample masks for the original images.
+                    image_mask_dtype = weight_dtype
+                    image_mask = 1 - (
+                        (random_p >= 0.05).to(
+                            image_mask_dtype)
+                        * (random_p < 3 * 0.05).to(image_mask_dtype)
+                    )
+                    image_mask = image_mask.reshape(bsz, 1, 1, 1)
+                    # Final image conditioning.
+                    conditional_latents = image_mask * conditional_latents
 
                 conditional_latents = conditional_latents.unsqueeze(
                     1).repeat(1, noisy_latents.shape[1], 1, 1, 1)

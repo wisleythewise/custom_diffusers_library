@@ -643,7 +643,11 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         else:
             controlnet_condition = torch.zeros_like(sample).to(sample.device, dtype=sample.dtype)
         
-        sample[1:,:,:4,:,:] += controlnet_condition
+        # Make sure the condition is added at the right place
+        if sample.shape[0] == 2:        
+            sample[1:,:,4:,:,:] += controlnet_condition
+        else:
+            sample[:,:,4:,:,:] += controlnet_condition
 
 
         sample = sample.flatten(0, 1)

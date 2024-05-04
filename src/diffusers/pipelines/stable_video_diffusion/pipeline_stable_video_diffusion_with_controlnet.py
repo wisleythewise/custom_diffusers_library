@@ -92,37 +92,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class CustomConditioningNet(nn.Module):
-    def __init__(self,output_size=(40, 64), num_channels=4):
+    def __init__(self,
+                conditioning_embedding_channels: int,
+                conditioning_channels: int = 3,
+                block_out_channels: Tuple[int, ...] = (16, 32, 96, 256),
+                output_size=(40, 64)):
+        
         super().__init__()
-        self.num_channels = num_channels
         self.output_size = output_size
 
-        # Adjust the channel dimensions to keep them fixed at 4
-        # While also implementing downsampling to reach the target spatial dimensions.
-        # A series of Conv2d and SiLU layers are defined with kernel_size=3, stride=2, and padding=1
-        # This will progressively halve the spatial dimensions while retaining the number of channels.
-        self.downsampling_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(self.num_channels-1, self.num_channels, kernel_size=3, stride=2, padding=1),
-                nn.SiLU(),
-                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
-                nn.SiLU(),
-                nn.Conv2d(self.num_channels, self.num_channels, kernel_size=3, stride=2, padding=1),
-                nn.SiLU()
-                
-            ),
-            # Additional downsampling blocks as needed
-        ])
+        self.conv_in = nn.Conv2d(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
 
-        # The last spatial dimension will be reduced to slightly larger than the target size.
-        # The exact layers needed will depend on the initial size and the amount of downsampling required.
+        self.blocks = nn.ModuleList([])
 
-        # Final adjustment to match the target spatial dimensions (40, 60).
-        # Using adaptive pooling to ensure the output matches the desired size.
+        for i in range(len(block_out_channels) - 1):
+            channel_in = block_out_channels[i]
+            channel_out = block_out_channels[i + 1]
+            self.blocks.append(nn.Conv2d(channel_in, channel_in, kernel_size=3, padding=1))
+            self.blocks.append(nn.Conv2d(channel_in, channel_out, kernel_size=3, padding=1, stride=2))
+
+
         self.adaptive_pool = nn.AdaptiveAvgPool2d(self.output_size)
 
         self.conv_out = zero_module(
-            nn.Conv2d(4, 4, kernel_size=3, padding=1)
+            nn.Conv2d(block_out_channels[-1], conditioning_embedding_channels, kernel_size=3, padding=1)
         )
 
     def cast_model_to(self, device, dtype):
@@ -154,17 +147,20 @@ class CustomConditioningNet(nn.Module):
             buffer.data = buffer.data.to(device=device, dtype=dtype)
         return
 
-    def forward(self, x, do_classifier_free=False):
+    def forward(self, conditioning, do_classifier_free=False):
         # print("this is the input shape", x.shape)
 
-        for layer in self.downsampling_layers:
-            x = layer(x)
+        embedding = self.conv_in(conditioning)
+        embedding = F.silu(embedding)
 
-        x = self.adaptive_pool(x)
-        x = self.conv_out(x)
-        x = x.unsqueeze(0)
+        for block in self.blocks:
+            embedding = block(embedding)
+            embedding = F.silu(embedding)
 
-        # print("this is the output shape", x.shape)
+        # print(f"this is the shape of the embedding before the adaptive pool: {embedding.shape}")
+        # x = self.adaptive_pool(embedding)
+        x = self.conv_out(embedding)
+
         
         return x
 
@@ -238,7 +234,10 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         cross_attention_dim: Union[int, Tuple[int]] = 1024,
         transformer_layers_per_block: Union[int, Tuple[int], Tuple[Tuple]] = 1,
         num_attention_heads: Union[int, Tuple[int]] = (5, 10, 20, 20),
-        conditioning_net_config = None
+        conditioning_net_config = None,
+        conditioning_embedding_out_channels: Optional[Tuple[int, ...]] = (16, 32, 96, 256),
+        conditioning_channels: int = 3,
+        ouput_size: Tuple[int, int] = (40, 64),
 
     ):
         super().__init__()
@@ -273,14 +272,14 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
 
         output_channel = block_out_channels[0]
 
-        # Inside SpatioTemporalControlNet __init__ method
-        self.config.conditioning_net_config = {
-            "output_size": (40, 64),
-            "num_channels" : 4
-        }
 
         # Then, you initialize CustomConditioningNet inside SpatioTemporalControlNet using this config
-        self.conditioning_embedding = CustomConditioningNet(**self.config.conditioning_net_config)
+        self.conditioning_embedding = CustomConditioningNet(
+            conditioning_embedding_channels=block_out_channels[0],
+            block_out_channels=conditioning_embedding_out_channels,
+            conditioning_channels=conditioning_channels,
+            output_size=ouput_size
+        )
 
         
    
@@ -601,6 +600,7 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
         t_emb = t_emb.to(dtype=sample.dtype , device = sample.device)
 
         emb = self.time_embedding(t_emb)
+        # print(f"this is the batch size: {batch_size}")
 
         time_embeds = self.add_time_proj(added_time_ids.flatten())
         time_embeds = time_embeds.reshape((batch_size, -1))
@@ -631,6 +631,9 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
                 
                 self.conditioning_embedding.cast_model_to(device=current_device, dtype=current_dtype)
                 
+        sample = sample.flatten(0, 1)
+        sample = self.conv_in(sample)
+        # print(f"This is the shape of the sample after the conv: {sample.shape}")
             
         if controlnet_condition is not None:
             # Check if it has the same shape as the sample otherwise error
@@ -638,20 +641,17 @@ class SpatioTemporalControlNet(ModelMixin, ConfigMixin):
             controlnet_condition = controlnet_condition.to(sample.device, dtype=sample.dtype)
             controlnet_condition =  self.conditioning_embedding.forward(controlnet_condition)
              
-            if not all(s1 == s2 for i, (s1, s2) in enumerate(zip(controlnet_condition.shape, sample.shape)) if i not in  [0,2]):
+            if controlnet_condition.shape != sample.shape:
                 raise ValueError(f"Jappie Controlnet condition shape {controlnet_condition.shape} does not match the sample shape {sample.shape}")
         else:
             controlnet_condition = torch.zeros_like(sample).to(sample.device, dtype=sample.dtype)
+
+        # print(f"This is the shape of the controlnet condition: {controlnet_condition.shape}") 
+        sample += controlnet_condition
         
-        # Make sure the condition is added at the right place
-        if sample.shape[0] == 2:        
-            sample[1:,:,4:,:,:] += controlnet_condition
-        else:
-            sample[:,:,4:,:,:] += controlnet_condition
 
 
-        sample = sample.flatten(0, 1)
-        sample = self.conv_in(sample)
+
         # Repeat the embeddings num_video_frames times
         # emb: [batch, channels] -> [batch * frames, channels]
         emb = emb.repeat_interleave(num_frames, dim=0).to(sample.device)
@@ -994,7 +994,7 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
 
 
-        embeds = torch.cat([prompt_embeds, negative_prompt_embeds])
+        embeds = torch.cat([negative_prompt_embeds,prompt_embeds])
         embeds = embeds.mean(dim=1, keepdim=True)
 
         return embeds
@@ -1658,7 +1658,6 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
 
-                # print(f"are we doing the classifier free guidance: {self.do_classifier_free_guidance}")
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
@@ -1668,15 +1667,22 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
 
 
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
-
-                down_block_res_samplesss, mid_block_res_samplesss = self.controlnet.forward(
-                    latent_model_input,
+                
+                down_block_res_samples, mid_block_res_sample = self.controlnet.forward(
+                    latent_model_input[1:] if self.do_classifier_free_guidance else latent_model_input,
                     t,
-                    encoder_hidden_states= prompt_embeds if prompt is not None else image_embeddings, 
-                    added_time_ids=added_time_ids,
+                    encoder_hidden_states= prompt_embeds[1:] if self.do_classifier_free_guidance else prompt_embeds, 
+                    added_time_ids=added_time_ids[1:] if self.do_classifier_free_guidance else added_time_ids,
                     return_dict=False,
                     controlnet_condition = conditioning_image
                 )
+
+                if self.do_classifier_free_guidance:
+                    # Infered ControlNet only for the conditional batch.
+                    # To apply the output of ControlNet to both the unconditional and conditional batches,
+                    # add 0 to the unconditional batch to keep it unchanged.
+                    down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+                    mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
 
 
                 
@@ -1687,8 +1693,8 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                     t,
                     encoder_hidden_states=image_embeddings,
                     added_time_ids=added_time_ids,
-                    down_block_additional_residuals= down_block_res_samplesss,
-                    mid_block_additional_residual = mid_block_res_samplesss,
+                    down_block_additional_residuals= down_block_res_samples,
+                    mid_block_additional_residual = mid_block_res_sample,
                     return_dict=False,
                 )[0]
 

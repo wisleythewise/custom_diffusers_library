@@ -192,7 +192,7 @@ class DiffusionDataset(Dataset):
         # prescan_images = self.image_processor.preprocess(image = prescan_images, height = 320, width = 512)
 
         # Processing conditioning images set one (assuming RGB, 4 channels after conversion)
-        conditioning_images_one = [self.transform(Image.open(path)) for path in self.data['conditioning_images_one'][idx]]
+        conditioning_images_one = [self.transform(Image.open(path).convert("RGB")) for path in self.data['conditioning_images_one'][idx]]
         conditioning_images_one = self.image_processor.preprocess(image = conditioning_images_one, height = 320, width = 512)
 
         # Processing conditioning images set two (assuming grayscale, converted to RGB to match dimensions)
@@ -600,6 +600,19 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         num_workers=0,  # Adjust based on your setup
     )
 
+    validation_dataset = DiffusionDataset(json_path='/home/wisley/custom_diffusers_library/src/diffusers/jasper/validation.json')
+
+    validation_dataloader = DataLoader(
+        validation_dataset,
+        shuffle=False,
+        collate_fn=collate_fn,
+        batch_size=1,  # Or your preferred batch size
+        num_workers=0,  # Adjust based on your setup
+    )
+
+    data_iter = iter(validation_dataloader)
+    batch_validation = next(data_iter)
+
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
@@ -623,9 +636,9 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         for name, param in unet.named_parameters():
             if "temporal_transformer_block" not in name:
                 # Set the desired attribute or action here. For example, to make the parameter trainable:
-                param.requires_grad = True
+                param.requires_grad = False 
             else:
-                param.requires_grad = False
+                param.requires_grad = True
 
 
         # Prepare everything with our `accelerator`.
@@ -636,6 +649,14 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
         controlnet.requires_grad_(True)
         for param in controlnet.parameters():
             param.requires_grad = True
+
+        # Do not train the temporal transformer block
+        for name, param in controlnet.named_parameters():
+            if "temporal" not in name:
+                # Set the desired attribute or action here. For example, to make the parameter trainable:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
 
         for param in unet.parameters():
             param.requires_grad = False
@@ -932,7 +953,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 if accelerator.is_main_process:
                     if global_step % 20 == 0 or global_step == 1:
                         try:
-                            validation_video(batch, pipe_with_controlnet, controlnet, unet, tokenizer, text_encoder, global_step) 
+                            validation_video(batch_validation, pipe_with_controlnet, controlnet, unet, tokenizer, text_encoder, global_step) 
                         except Exception as e:
                             print(e)
 
@@ -1021,7 +1042,7 @@ if __name__ == "__main__":
 
 
     main(
-        output_dir="/mnt/e/13_Jasper_diffused_samples/training/unet_maybe_final",
+        output_dir="/mnt/e/13_Jasper_diffused_samples/training/a",
         logging_dir="/mnt/e/13_Jasper_diffused_samples/training/logs",
         gradient_accumulation_steps=4,
         mixed_precision="fp16",

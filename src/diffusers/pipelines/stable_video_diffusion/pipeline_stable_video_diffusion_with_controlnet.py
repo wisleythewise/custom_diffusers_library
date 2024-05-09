@@ -149,6 +149,9 @@ class CustomConditioningNet(nn.Module):
 
     def forward(self, conditioning, do_classifier_free=False):
         # print("this is the input shape", x.shape)
+        batch_size, frames, channels, height, width = conditioning.size()
+        conditioning = conditioning.view(batch_size * frames, channels, height, width)
+
 
         embedding = self.conv_in(conditioning)
         embedding = F.silu(embedding)
@@ -1642,6 +1645,11 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
             latents,
         )
 
+        # Prepare the latents for the conditional batch
+        controlnet_condition = conditioning_image.unsqueeze(0)
+        controlnet_condition = torch.cat([controlnet_condition] * 2) 
+        controlnet_condition = controlnet_condition.to(device, latents.dtype)
+
         # 7. Prepare guidance scale
         guidance_scale = torch.linspace(min_guidance_scale, max_guidance_scale, num_frames).unsqueeze(0)
         guidance_scale = guidance_scale.to(device, latents.dtype)
@@ -1669,20 +1677,14 @@ class StableVideoDiffusionPipelineWithControlNet(DiffusionPipeline):
                 latent_model_input = torch.cat([latent_model_input, image_latents], dim=2)
                 
                 down_block_res_samples, mid_block_res_sample = self.controlnet.forward(
-                    latent_model_input[1:] if self.do_classifier_free_guidance else latent_model_input,
+                    latent_model_input,
                     t,
-                    encoder_hidden_states= prompt_embeds[1:] if self.do_classifier_free_guidance else prompt_embeds, 
-                    added_time_ids=added_time_ids[1:] if self.do_classifier_free_guidance else added_time_ids,
+                    encoder_hidden_states= prompt_embeds, 
+                    added_time_ids=added_time_ids,
                     return_dict=False,
-                    controlnet_condition = conditioning_image
+                    controlnet_condition = controlnet_condition
                 )
 
-                if self.do_classifier_free_guidance:
-                    # Infered ControlNet only for the conditional batch.
-                    # To apply the output of ControlNet to both the unconditional and conditional batches,
-                    # add 0 to the unconditional batch to keep it unchanged.
-                    down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
-                    mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
 
 
                 

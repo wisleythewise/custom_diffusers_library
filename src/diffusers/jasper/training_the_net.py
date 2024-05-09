@@ -398,7 +398,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
 
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
-        # mixed_precision=mixed_precision,
+        mixed_precision="fp16",
         log_with= "wandb",
         project_config=accelerator_project_config,
     )
@@ -702,7 +702,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
     if accelerator.is_main_process:
         training_config = {
                 "max_train_steps": 50000,
-                "learning_rate": 1e-5,
+                "learning_rate": 2e-5,
                 "lr_scheduler": "constant",
                 "lr_warmup_steps": 0,
                 "num_train_epochs": 50,
@@ -790,8 +790,6 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # )
                 conditional_pixel_values = pixel_values[:, 0:1, :, :, :]
                 
-                encoder_hidden_states = encode_image(
-                    pixel_values[:, 0, :, :, :].float(), feature_extractor=feature_extractor, image_encoder=image_encoder, accelerator=accelerator, weight_dtype=weight_dtype)
 
                 latents = tensor_to_vae_latent(pixel_values, vae)
 
@@ -814,13 +812,27 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                 # (this is the forward diffusion process)
                 sigmas = sigmas[:, None, None, None, None]
                 noisy_latents = latents + noise * sigmas
-                timesteps = torch.Tensor(
-                    [0.25 * sigma.log() for sigma in sigmas]).to(accelerator.device)
                 
 
+                timesteps = torch.Tensor(
+                    [0.25 * sigma.log() for sigma in sigmas]).to(accelerator.device)
+                timesteps = timesteps.to(device=accelerator.device, dtype=weight_dtype)
 
                 inp_noisy_latents = noisy_latents / ((sigmas**2 + 1) ** 0.5)
-                timesteps = timesteps.to(device=accelerator.device, dtype=weight_dtype)
+                
+                encoder_hidden_states = encode_image(
+                    pixel_values[:, 0, :, :, :].float(), feature_extractor=feature_extractor, image_encoder=image_encoder, accelerator=accelerator, weight_dtype=weight_dtype)
+                
+                added_time_ids = _get_add_time_ids(
+                    7, # fixed
+                    127, # motion_bucket_id = 127, fixed
+                    noise_aug_strength, # noise_aug_strength == cond_sigmas
+                    encoder_hidden_states.dtype,
+                    bsz,
+                    unet
+                )
+                added_time_ids = added_time_ids.to(device=accelerator.device, dtype=weight_dtype)
+
 
                 if True:
                     random_p = torch.rand(
@@ -849,19 +861,9 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     [inp_noisy_latents, conditional_latents], dim=2)
                 inp_noisy_latents = inp_noisy_latents.to(device=accelerator.device, dtype=weight_dtype)
 
-                
-                added_time_ids = _get_add_time_ids(
-                    7, # fixed
-                    127, # motion_bucket_id = 127, fixed
-                    noise_aug_strength, # noise_aug_strength == cond_sigmas
-                    encoder_hidden_states.dtype,
-                    bsz,
-                    unet
-                )
 
                 # Make sure encoder hidden states and the added time ids are on the same device
                 encoder_hidden_states = encoder_hidden_states.to(device=accelerator.device, dtype=weight_dtype)
-                added_time_ids = added_time_ids.to(device=accelerator.device, dtype=weight_dtype)
 
                 if train_unet:
                     model_pred = unet(
@@ -886,7 +888,7 @@ def main(output_dir, logging_dir, gradient_accumulation_steps, mixed_precision, 
                     model_pred = unet(
                         inp_noisy_latents,
                         timesteps,
-                        encoder_hidden_states= inputs["unet_encoder_hidden_states"][:1],
+                        encoder_hidden_states= encoder_hidden_states,
                         added_time_ids= added_time_ids,
                         down_block_additional_residuals= down_block_res_samples,
                         mid_block_additional_residual = mid_block_res_sample,
